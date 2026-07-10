@@ -1,0 +1,4 @@
+#!/bin/zsh
+# Usage: ./tekk <song file> [--bpm 180]
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$DIR/.venv/bin/python" "$DIR/hardtekk.py" "$@"

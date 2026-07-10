@@ -1,0 +1,6 @@
+.venv/
+input/
+output/
+.done/
+.DS_Store
+.claude/

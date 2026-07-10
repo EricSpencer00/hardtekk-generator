@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hardtekk Generator</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --panel: #12121c;
+    --edge: #23233a;
+    --text: #e8e8f0;
+    --dim: #8888a0;
+    --acid: #b6ff2e;
+    --hot: #ff2ea6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+    padding: 2rem 1rem 4rem;
+  }
+  h1 {
+    font-size: clamp(1.6rem, 5vw, 2.6rem); letter-spacing: 0.08em;
+    text-transform: uppercase; margin-bottom: 0.3rem;
+  }
+  h1 .k { color: var(--acid); }
+  .tag { color: var(--dim); margin-bottom: 2rem; font-size: 0.85rem; }
+  main { width: 100%; max-width: 720px; display: flex; flex-direction: column; gap: 1rem; }
+  #drop {
+    border: 2px dashed var(--edge); border-radius: 12px; padding: 3rem 1rem;
+    text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
+    background: var(--panel);
+  }
+  #drop:hover, #drop.over { border-color: var(--acid); background: #161624; }
+  #drop .big { font-size: 1.1rem; margin-bottom: 0.4rem; }
+  #drop .sub { color: var(--dim); font-size: 0.8rem; }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 1rem; align-items: center;
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 12px; padding: 1rem;
+  }
+  .controls label { font-size: 0.8rem; color: var(--dim); display: block; margin-bottom: .3rem; }
+  .ctl { flex: 1; min-width: 180px; }
+  input[type=range] { width: 100%; accent-color: var(--acid); }
+  input[type=text] {
+    width: 100%; background: #0c0c14; border: 1px solid var(--edge); border-radius: 6px;
+    color: var(--text); padding: .45rem .6rem; font-family: inherit; font-size: .85rem;
+  }
+  #bpmval { color: var(--acid); }
+  button#go {
+    width: 100%; padding: .9rem; font-family: inherit; font-size: 1rem; font-weight: 700;
+    letter-spacing: .1em; text-transform: uppercase; border: none; border-radius: 12px;
+    background: var(--acid); color: #0a0a0f; cursor: pointer;
+  }
+  button#go:disabled { background: var(--edge); color: var(--dim); cursor: not-allowed; }
+  #log {
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 12px;
+    padding: 1rem; font-size: .78rem; line-height: 1.5; white-space: pre-wrap;
+    overflow-x: auto; display: none; color: var(--dim);
+  }
+  #log .hi { color: var(--acid); }
+  #log .drop { color: var(--hot); }
+  #result { display: none; flex-direction: column; gap: .8rem;
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 12px; padding: 1rem; }
+  audio { width: 100%; }
+  a#dl {
+    display: block; text-align: center; padding: .7rem; border-radius: 10px;
+    border: 1px solid var(--acid); color: var(--acid); text-decoration: none;
+    font-weight: 700; letter-spacing: .08em;
+  }
+  a#dl:hover { background: var(--acid); color: #0a0a0f; }
+  footer { margin-top: 2.5rem; color: var(--dim); font-size: .75rem; }
+  footer a { color: var(--dim); }
+</style>
+</head>
+<body>
+  <h1>HARD<span class="k">TEKK</span> GENERATOR</h1>
+  <div class="tag">drop a song in — get a hardtekk remix out. 100% in your browser, nothing uploaded.</div>
+  <main>
+    <div id="drop">
+      <div class="big">drag a song here or click to pick</div>
+      <div class="sub">mp3 / wav / m4a / flac / ogg</div>
+      <input type="file" id="file" accept="audio/*" hidden>
+    </div>
+    <div class="controls">
+      <div class="ctl">
+        <label>target tempo — <span id="bpmval">180</span> BPM</label>
+        <input type="range" id="bpm" min="150" max="200" value="180" step="1">
+      </div>
+      <div class="ctl">
+        <label>force drops at seconds (optional, e.g. 30,72)</label>
+        <input type="text" id="dropat" placeholder="auto-detect">
+      </div>
+    </div>
+    <button id="go" disabled>generate</button>
+    <div id="log"></div>
+    <div id="result">
+      <audio id="player" controls></audio>
+      <a id="dl" download>download wav</a>
+    </div>
+  </main>
+  <footer><a href="https://github.com/EricSpencer00/hardtekk-generator">source on github</a></footer>
+  <script src="app.js"></script>
+</body>
+</html>
