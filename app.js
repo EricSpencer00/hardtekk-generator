@@ -415,7 +415,7 @@ const KICK_MAIN = patIdx("x.x.x.x.x.x.xxx.");
 const KICK_SPARSE = patIdx("x...x...x...x...");
 const KICK_ROLL = patIdx("x.x.x.x.xxx.xxxx");
 
-function sidechainEnv(n, beatSamples, floor = 0.55) {
+function sidechainEnv(n, beatSamples, floor = 0.35) {
   const out = new Float32Array(n);
   const duckLen = Math.floor(beatSamples * 0.5);
   for (let i = 0; i < n; i++) {
@@ -452,12 +452,18 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
   const beat = beatSamples / sr;
   const freq = 440 * Math.pow(2, (rootMidi - 69) / 12);
 
+  const synthKick = makeKick(freq, beat * 0.95, sr);
   let kick = samples.kick;
   if (kick) {                                  // pitch sample from C to root
     let steps = ((rootMidi % 12) + 12) % 12;
     if (steps > 6) steps -= 12;
     if (steps) kick = resample(kick, Math.pow(2, steps / 12));
-  } else kick = makeKick(freq, beat * 0.95, sr);
+    kick = Float32Array.from(kick.slice(0, Math.floor(beat * 0.95 * sr)));
+    // the sample's energy peaks late; layer the synth kick's instant transient
+    // under it so the hit lands ON the beat and punches harder
+    const m = Math.min(kick.length, synthKick.length);
+    for (let i = 0; i < m; i++) kick[i] = Math.tanh(kick[i] + synthKick[i] * 0.7);
+  } else kick = synthKick;
   kick = kick.slice(0, Math.floor(beat * 0.95 * sr));
   const stab = makeBassStab(freq, beat * 0.45, sr);
   const chat = makeHat(0.05, false, sr);
@@ -472,7 +478,7 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
   const songGain = new Float32Array(nSamples + pad).fill(1);
   const duckBase = sidechainEnv(drums.length, beatSamples);
   const duck = i => duckBase[(((i - offset) % drums.length) + drums.length) % drums.length];
-  const filterRegions = [], dropStarts = [];
+  const filterRegions = [], dropRegions = [], dropStarts = [];
   let dropIndex = 0;
 
   const put = (buf, i, sig, amp) => {
@@ -514,6 +520,7 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
       }
     } else if (name === "drop") {
       dropStarts.push(s0);
+      dropRegions.push([s0, s1]);
       for (let i = s0; i < s1; i++) songGain[i] = duck(i);
       const rng = mulberry(1000 + dropIndex);
       put(drums, s0, bell, 0.4);
@@ -554,7 +561,7 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
   return {
     drums: drums.subarray(0, nSamples),
     songGain: smoothGain(songGain.subarray(0, nSamples), sr),
-    filterRegions, dropStarts,
+    filterRegions, dropRegions, dropStarts,
   };
 }
 
@@ -597,10 +604,13 @@ async function loadSamples(ctx) {
     try {
       const buf = await (await fetch(url)).arrayBuffer();
       const audio = await ctx.decodeAudioData(buf);
-      const d = audio.getChannelData(0).slice();
+      let d = audio.getChannelData(0).slice();
       let mx = 1e-9;
       for (const v of d) mx = Math.max(mx, Math.abs(v));
       for (let i = 0; i < d.length; i++) d[i] /= mx;
+      let hot = 0;                                // trim leading silence so the
+      while (hot < d.length && Math.abs(d[hot]) <= 0.05) hot++;   // hit is on-grid
+      if (hot > 0 && hot < d.length) d = d.subarray(hot);
       out[k] = d;
     } catch { out[k] = null; }
   }));
@@ -704,9 +714,11 @@ async function generate(file, targetBPM, dropAt, log) {
   await yield_();
 
   log(`building arrangement — ${nBars} bars, ${drops.length || "auto"} drop(s) ...`);
-  const { drums, songGain, filterRegions, dropStarts } =
+  const { drums, songGain, filterRegions, dropRegions, dropStarts } =
     buildArrangement(mono.length, sr, beatSamples, rootMidi, sections, offset, samples);
   for (const [a, b] of filterRegions) highpassSweep(mono, a, b, sr);
+  // carve the song's low end out during drops so the tekk kick owns it
+  for (const [a, b] of dropRegions) { biquadHP(mono, a, b, 110, sr); biquadHP(mono, a, b, 110, sr); }
   if (dropStarts.length)
     log(`  drops land at ${dropStarts.map(s => (s / sr).toFixed(0) + "s").join(", ")}`);
   await yield_();
@@ -716,7 +728,7 @@ async function generate(file, targetBPM, dropAt, log) {
   const drive = 1.15, td = Math.tanh(drive);
   let mx = 1e-9;
   for (let i = 0; i < mix.length; i++) {
-    mix[i] = Math.tanh((mono[i] * songGain[i] * 0.85 + drums[i] * 0.62) * drive) / td;
+    mix[i] = Math.tanh((mono[i] * songGain[i] * 0.80 + drums[i] * 0.75) * drive) / td;
     mx = Math.max(mx, Math.abs(mix[i]));
   }
   for (let i = 0; i < mix.length; i++) mix[i] = mix[i] / mx * 0.97;

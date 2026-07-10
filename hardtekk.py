@@ -113,7 +113,7 @@ def make_hat(dur, open_hat=False, sr=SR):
     return noise * np.exp(-t * decay)
 
 
-def sidechain_env(n_samples, beat_samples, sr=SR, floor=0.55):
+def sidechain_env(n_samples, beat_samples, sr=SR, floor=0.35):
     """Per-beat ducking envelope: dips to `floor` on each kick, recovers by the offbeat."""
     one = np.ones(beat_samples)
     duck_len = int(beat_samples * 0.5)
@@ -132,7 +132,10 @@ def load_samples(root_midi, sr=SR):
         if not os.path.exists(path):
             return None
         y, _ = librosa.load(path, sr=sr, mono=True)
-        return y / max(np.max(np.abs(y)), 1e-9)
+        y = y / max(np.max(np.abs(y)), 1e-9)
+        # trim leading silence so the transient lands exactly on the grid
+        hot = np.flatnonzero(np.abs(y) > 0.05)
+        return y[hot[0]:] if len(hot) else y
 
     kick = load("kick-hardtekk_C.wav")
     if kick is not None:
@@ -424,8 +427,14 @@ def build_arrangement(n_samples, bpm, root_midi, sections, offset=0, sr=SR):
     freq = librosa.midi_to_hz(root_midi)
 
     smp = load_samples(root_midi, sr)
-    kick = smp["kick"] if smp["kick"] is not None else make_kick(freq, beat * 0.95)
-    kick = kick[: int(beat * 0.95 * sr)]
+    synth_kick = make_kick(freq, beat * 0.95)
+    kick = smp["kick"] if smp["kick"] is not None else synth_kick
+    kick = np.copy(kick[: int(beat * 0.95 * sr)])
+    if smp["kick"] is not None:
+        # the sample's energy peaks ~75 ms in; layer the synth kick's instant
+        # transient under it so the hit lands ON the beat and punches harder
+        m = min(len(kick), len(synth_kick))
+        kick[:m] = np.tanh(kick[:m] + synth_kick[:m] * 0.7)
     dbl_kick = kick[: bs // 2]  # short kick for double-kick 8ths
     stab = make_bass_stab(freq, beat * 0.45)
     chat = make_hat(0.05)
@@ -444,8 +453,9 @@ def build_arrangement(n_samples, bpm, root_midi, sections, offset=0, sr=SR):
     # Song stays present the whole time; sidechain only ducks, never mutes.
     song_gain = np.full(n_samples + pad, 1.0)
     # duck rolled by offset so ducking troughs land on the phase-locked kicks
-    duck = np.roll(sidechain_env(len(drums), bs, floor=0.55), offset)
+    duck = np.roll(sidechain_env(len(drums), bs, floor=0.35), offset)
     filter_regions = []
+    drop_regions = []
     drop_starts = []
     drop_index = 0
 
@@ -494,6 +504,7 @@ def build_arrangement(n_samples, bpm, root_midi, sections, offset=0, sr=SR):
 
         elif name == "drop":
             drop_starts.append(s0)
+            drop_regions.append((s0, s1))
             song_gain[s0:s1] = duck[s0:s1]
             rng = np.random.default_rng(1000 + drop_index)
             put(drums, s0, bell, 0.4)  # bell marks the drop
@@ -555,7 +566,7 @@ def build_arrangement(n_samples, bpm, root_midi, sections, offset=0, sr=SR):
         bar += bars
 
     song_gain = smooth_gain(song_gain[:n_samples])
-    return drums[:n_samples], song_gain, filter_regions, drop_starts
+    return drums[:n_samples], song_gain, filter_regions, drop_regions, drop_starts
 
 
 def high_from_drops(n_bars, drops):
@@ -613,7 +624,7 @@ def hardtekk(in_path, out_path, target_bpm=180.0, drop_at=None):
     print("  bar map (# = song's beat in, ^ = drop):")
     print("  " + structure_map(high, drops).replace("\n", "\n  "))
 
-    drums, song_gain, filter_regions, drop_starts = build_arrangement(
+    drums, song_gain, filter_regions, drop_regions, drop_starts = build_arrangement(
         len(y), grid_bpm, root_midi, sections, offset)
     print(f"  {len(high)} bars, {len(drop_starts)} hardtekk drop(s) at "
           + ", ".join(f"{s/SR:.0f}s" for s in drop_starts))
@@ -622,9 +633,14 @@ def hardtekk(in_path, out_path, target_bpm=180.0, drop_at=None):
     for a, b in filter_regions:
         y[a:b] = highpass_sweep(y[a:b])
 
+    # carve the song's low end out during drops so the tekk kick owns it
+    sos_hp = butter(2, 110, "hp", fs=SR, output="sos")
+    for a, b in drop_regions:
+        y[a:b] = sosfilt(sos_hp, y[a:b])
+
     print("  Sidechaining + mixing...")
     # Song sits loud and up front; drums support it rather than bury it.
-    mix = y * song_gain * 0.85 + drums * 0.62
+    mix = y * song_gain * 0.80 + drums * 0.75
     mix = soft_clip(mix, drive=1.15)  # gentler saturation = less harsh/jarring
     mix = mix / max(np.max(np.abs(mix)), 1e-9) * 0.97
 

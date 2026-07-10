@@ -20,11 +20,10 @@ SR = 44100
 
 
 def fold(t, target):
-    while t < target / 1.5:
-        t *= 2
-    while t > target * 1.5:
-        t /= 2
-    return t
+    """Fold a tracked tempo across common metrical aliases (2:1, 3:2) to the
+    candidate closest to the target — trackers love locking onto rolls."""
+    cands = [t * r for r in (0.5, 2 / 3, 3 / 4, 1.0, 4 / 3, 3 / 2, 2.0)]
+    return min(cands, key=lambda c: abs(c - target))
 
 
 def score(path, target_bpm=180.0):
@@ -73,19 +72,22 @@ def score(path, target_bpm=180.0):
                 hits += 1
     fof = hits / total if total else 0.0
 
-    # pump depth: per-half-beat RMS alternation inside loud bars
-    hb = int(bs / 2)
+    # pump depth: within each beat of a loud bar, peak-to-trough of a short-window
+    # RMS envelope (offbeat bass is allowed — we only ask that the envelope dips
+    # hard somewhere every beat, i.e. the mix breathes at beat rate)
     depths = []
+    win = int(bs / 16)
     for b in range(n_bars):
         if not loud[b]:
             continue
-        seg = y[b * barlen + int(offset): (b + 1) * barlen + int(offset)]
-        if len(seg) < barlen:
-            continue
-        r = [np.sqrt(np.mean(seg[i * hb:(i + 1) * hb] ** 2)) for i in range(8)]
-        on = np.mean(r[0::2])
-        off = np.mean(r[1::2])
-        depths.append(abs(on - off) / max(on, off, 1e-9))
+        for k in range(4):
+            a0 = b * barlen + int(offset + k * bs)
+            seg = y[a0: a0 + int(bs)]
+            if len(seg) < bs:
+                continue
+            r = np.array([np.sqrt(np.mean(seg[i * win:(i + 1) * win] ** 2)) for i in range(16)])
+            if r.max() > 1e-6:
+                depths.append(1.0 - r.min() / r.max())
     pump = float(np.mean(depths)) if depths else 0.0
 
     # low-end ownership: 30-120Hz energy, loud bars over quiet bars
