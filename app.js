@@ -1,7 +1,8 @@
 /* Hardtekk Generator — fully client-side port of hardtekk.py.
  * Pipeline: detect BPM + key -> speed up to target BPM -> phase-lock a bar grid
- * to the measured downbeat -> analyze structure for drops -> lay a distorted
- * tekk kick / offbeat bass / hats arrangement on the grid -> sidechain + clip.
+ * to the measured downbeat -> analyze structure for drops -> lay a sample-only
+ * arrangement (kick / offbeat bass / snare / bell, no synth) -> sidechain + clip.
+ * The kick sample plays at its native pitch (C) — never retuned to the song key.
  */
 "use strict";
 
@@ -177,76 +178,6 @@ function mulberry(seed) {                    // deterministic rng
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-}
-
-function makeKick(freq, beatLen, sr) {
-  const n = Math.floor(beatLen * sr);
-  const out = new Float32Array(n);
-  let phase = 0;
-  const fStart = Math.max(freq * 2.5, 220);
-  for (let i = 0; i < n; i++) {
-    const t = i / sr;
-    const f = freq + (fStart - freq) * Math.exp(-t * 55);
-    phase += 2 * Math.PI * f / sr;
-    let env = Math.exp(-t * 7);
-    if (i < 0.002 * sr) env *= i / (0.002 * sr);
-    let k = Math.sin(phase) * env;
-    k = Math.tanh(k * 6);
-    k = Math.tanh(k * 2.5) * 0.95;
-    out[i] = k;
-  }
-  const rng = mulberry(3), nClick = Math.floor(0.004 * sr);
-  for (let i = 0; i < nClick; i++) out[i] += (rng() * 2 - 1) * (1 - i / nClick) * 0.25;
-  return out;
-}
-
-function makeBassStab(freq, dur, sr) {
-  const n = Math.floor(dur * sr);
-  const out = new Float32Array(n);
-  const f = freq * 2;
-  for (let i = 0; i < n; i++) {
-    const t = i / sr;
-    const saw = 2 * ((t * f) % 1) - 1;
-    const sub = Math.sin(2 * Math.PI * f * t);
-    out[i] = Math.tanh((0.6 * saw + 0.6 * sub) * Math.exp(-t * 18) * 3) * 0.8;
-  }
-  return out;
-}
-
-function makeHat(dur, open, sr) {
-  const n = Math.floor(dur * sr);
-  const rng = mulberry(open ? 7 : 11);
-  let noise = new Float32Array(n);
-  for (let i = 0; i < n; i++) noise[i] = rng() * 2 - 1;
-  {                       // crude highpass: single diff (twice was all sizzle)
-    const d = new Float32Array(n);
-    for (let i = 1; i < n; i++) d[i] = noise[i] - noise[i - 1];
-    noise = d;
-  }
-  let mx = 1e-9;
-  for (const v of noise) mx = Math.max(mx, Math.abs(v));
-  const decay = open ? 4 : 35;
-  for (let i = 0; i < n; i++) noise[i] = noise[i] / mx * Math.exp(-i / sr * decay);
-  return noise;
-}
-
-function makeRiser(dur, sr) {
-  const n = Math.floor(dur * sr);
-  const rng = mulberry(5);
-  const out = new Float32Array(n);
-  let prev = 0, phase = 0, mx = 1e-9;
-  const tmp = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const w = rng() * 2 - 1;
-    tmp[i] = w - prev; prev = w;
-    mx = Math.max(mx, Math.abs(tmp[i]));
-  }
-  for (let i = 0; i < n; i++) {
-    const t = i / sr, fr = t / dur;
-    phase += 2 * Math.PI * (200 + 1800 * fr * fr) / sr;
-    out[i] = (tmp[i] / mx * 0.7 + Math.sin(phase) * 0.3) * fr * fr;
-  }
-  return out;
 }
 
 /* ---------------- structure analysis (ports) ---------------- */
@@ -442,43 +373,18 @@ function smoothGain(g, sr, ms = 30) {
   return out;
 }
 
-// linear-interp resample (used to pitch the kick sample to the song key)
-function resample(sig, ratio) {
-  const n = Math.floor(sig.length / ratio);
-  const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const x = i * ratio, j = Math.floor(x), f = x - j;
-    out[i] = sig[j] + ((sig[j + 1] ?? 0) - sig[j]) * f;
-  }
-  return out;
-}
-
-function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset, samples) {
+function buildArrangement(nSamples, sr, beatSamples, sections, offset, samples) {
   const beat = beatSamples / sr;
-  const freq = 440 * Math.pow(2, (rootMidi - 69) / 12);
 
-  const synthKick = makeKick(freq, beat * 0.95, sr);
-  let kick = samples.kick;
-  if (kick) {                                  // pitch sample from C to root
-    let steps = ((rootMidi % 12) + 12) % 12;
-    if (steps > 6) steps -= 12;
-    if (steps) kick = resample(kick, Math.pow(2, steps / 12));
-    kick = Float32Array.from(kick.slice(0, Math.floor(beat * 0.95 * sr)));
-    // the sample's energy peaks late; layer the synth kick's instant transient
-    // under it so the hit lands ON the beat and punches harder
-    const m = Math.min(kick.length, synthKick.length);
-    for (let i = 0; i < m; i++) kick[i] = Math.tanh(kick[i] + synthKick[i] * 0.7);
-  } else kick = synthKick;
-  kick = kick.slice(0, Math.floor(beat * 0.95 * sr));
-  kick = kick.slice(0, Math.floor(beat * 0.45 * sr));  // tight: gaps make punch
-  // tekk kicks live in the mids: hard second distortion stage folds the
-  // fundamental into harmonics, plus a clean sub-octave sine underneath
-  for (let i = 0; i < kick.length; i++) {
-    const t = i / sr;
-    kick[i] = Math.tanh(kick[i] * 3) * 0.95 +
-      Math.sin(2 * Math.PI * (freq / 2) * t) * Math.exp(-t * 10) * 0.65;
-  }
-  // tekk bassline = the kick itself, lowpassed and short, on 16ths
+  // Sample-only: the kick sample stays at its native pitch (C). No retuning —
+  // pitch-shifting it up to the song key made it thin and too high. There are
+  // no synth oscillators here, so nothing is tuned to the song's key.
+  if (!samples.kick) throw new Error("kick-hardtekk_C.wav is required (sample-only mode).");
+  let kick = Float32Array.from(samples.kick.slice(0, Math.floor(beat * 0.45 * sr)));  // tight: gaps make punch
+  // tekk kicks live in the mids: hard distortion folds the sample's fundamental
+  // into harmonics (reference kick has almost no 60-120Hz energy)
+  for (let i = 0; i < kick.length; i++) kick[i] = Math.tanh(kick[i] * 3) * 0.95;
+  // tekk bassline = the kick sample itself, lowpassed and short, on 16ths
   const stab = Float32Array.from(kick.slice(0, Math.floor(beat * 0.22 * sr)));
   biquadLP(stab, 0, stab.length, 250, sr);
   {
@@ -486,8 +392,6 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
     for (const v of stab) smx = Math.max(smx, Math.abs(v));
     for (let i = 0; i < stab.length; i++) stab[i] = stab[i] / smx * 0.9;
   }
-  const chat = makeHat(0.05, false, sr);
-  const ohat = makeHat(0.18, true, sr);
   const snare = samples.snare;
   const kickAlt = samples.kickAlt ? samples.kickAlt.slice(0, Math.floor(beat * 0.45 * sr)) : null;
   const bell = samples.bell;
@@ -514,11 +418,7 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
     if (s1 <= s0) break;
 
     if (name === "intro") {
-      const half = bar + (bars >> 1);
-      for (let b = half * 4; b < (bar + bars) * 4; b++) {
-        const i = offset + b * beatSamples;
-        for (let s = 0; s < 4; s++) put(drums, i + Math.floor(s * beatSamples / 4), chat, 0.12);
-      }
+      // no hats (sample-only): the intro is just the song, untouched
     } else if (name === "build") {
       filterRegions.push([s0, s1]);
       // song pulled back hard, NO kick: the low end must vanish before the
@@ -532,8 +432,7 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
         if (snare) for (let s = 0; s < divs; s++)
           put(drums, i + Math.floor(s * beatSamples / divs), snare, 0.22 + 0.2 * frac);
       }
-      const rBars = Math.min(2, bars);   // riser only over the last 2 bars, quiet
-      put(drums, s1 - rBars * 4 * beatSamples, makeRiser(rBars * 4 * beat, sr), 0.25);
+      // (no riser: sample-only — the snare build + the breath below carry the tension)
       const gap0 = Math.max(s1 - (beatSamples >> 1), s0);   // half-beat breath before drop
       const gStart = songGain[gap0];
       for (let i = gap0; i < s1; i++) {
@@ -569,14 +468,12 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
         if (onBeat) {
           for (const [s16, amp16] of [[1, 0.75], [2, 1.0], [3, 0.85]])
             put(drums, i + Math.floor(s16 * beatSamples / 4), stab, amp16 * amp);
-        } else put(drums, i, ohat, 0.40);
-        put(drums, i, chat, onBeat ? 0.30 : 0.20);
+        }
+        // (no hats: sample-only — kick + bass + snare carry the drop)
       }
       dropIndex++;
     } else if (name === "break") {
-      put(drums, s0, bell, 0.35);
-      for (let b = 0; b < bars * 4; b++)
-        if (b % 2 === 1) put(drums, s0 + b * beatSamples + (beatSamples >> 1), ohat, 0.18);
+      put(drums, s0, bell, 0.35);   // no hats (sample-only)
     }
     bar += bars;
   }
@@ -719,7 +616,7 @@ async function generate(file, targetBPM, dropAt, log) {
   const chroma = new Float64Array(12);
   const envSrc = onsetEnvelope(mono, sr, chroma);
   const bpm = detectBPM(envSrc, sr);
-  const { key, mode, rootMidi } = detectKey(chroma);
+  const { key, mode } = detectKey(chroma);  // key/mode for display only; nothing is tuned now
   log(`  detected: <span class="hi">${bpm.toFixed(1)} BPM</span>, key <span class="hi">${key} ${mode}</span>`);
   await yield_();
 
@@ -773,7 +670,7 @@ async function generate(file, targetBPM, dropAt, log) {
 
   log(`building arrangement — ${nBars} bars, ${drops.length || "auto"} drop(s) ...`);
   const { drums, songGain, filterRegions, dropRegions, dropStarts } =
-    buildArrangement(mono.length, sr, beatSamples, rootMidi, sections, offset, samples);
+    buildArrangement(mono.length, sr, beatSamples, sections, offset, samples);
   for (const [a, b] of filterRegions) highpassSweep(mono, a, b, sr);
   // carve the song's low end out during drops so the tekk kick owns it
   // steep: any low residue smears the low band into a wall and kills the punch

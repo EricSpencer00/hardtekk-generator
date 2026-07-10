@@ -6,10 +6,13 @@ Drop a song in, get a hardtekk remix out.
 Recipe (the classic hardtekk formula):
   1. Detect the source BPM and key.
   2. Time-stretch the whole track up to ~180 BPM (keeps pitch).
-  3. Slam a distorted 4/4 tekk kick under it, tuned to the song's key.
-  4. Offbeat bass stab (also in key), offbeat open hats, 16th closed hats.
+  3. Slam the real distorted 4/4 tekk kick SAMPLE under it, at its native
+     pitch — no retuning (pitch-shifting the sample made it thin and too high).
+  4. Offbeat bassline = the same kick sample, low-passed and short.
   5. Sidechain-duck the original against the kick so it pumps.
   6. Soft-clip the master for that crunchy tekk sound.
+
+Every pitched voice comes from a sample; there are no synth oscillators.
 
 Usage:
   python hardtekk.py <song.(mp3|wav|m4a|flac|ogg)> [--bpm 180] [-o out.wav]
@@ -81,65 +84,22 @@ def eq_peak(x, f0, gain_db, q=1.4, sr=SR):
     return lfilter(b / a[0], a / a[0], x)
 
 
-def make_kick(freq, beat_len, sr=SR):
-    """Distorted hardtekk kick: fast pitch-sweep sine into hard saturation."""
-    n = int(beat_len * sr)
-    t = np.arange(n) / sr
-    # exponential pitch envelope: start high, drop to root fast
-    f_start, f_end = max(freq * 2.5, 220.0), freq
-    sweep = f_end + (f_start - f_end) * np.exp(-t * 55)
-    phase = 2 * np.pi * np.cumsum(sweep) / sr
-    body = np.sin(phase)
-    # amp envelope: punchy, long enough to feel like a bass-kick
-    env = np.exp(-t * 7.0)
-    env[: int(0.002 * sr)] *= np.linspace(0, 1, int(0.002 * sr))
-    kick = body * env
-    # the tekk part: heavy tanh distortion, then a second stage
-    kick = np.tanh(kick * 6.0)
-    kick = np.tanh(kick * 2.5) * 0.95
-    # click transient
-    click = np.zeros(n)
-    nclick = int(0.004 * sr)
-    click[:nclick] = np.random.default_rng(3).uniform(-1, 1, nclick) * np.linspace(1, 0, nclick)
-    return kick + click * 0.25
-
-
-def make_bass_stab(freq, dur, sr=SR):
-    """Offbeat saw bass stab in the kick's octave — it must read as LOW-END
-    (the reference's offbeat bass shows up as low-band onsets between kicks)."""
-    n = int(dur * sr)
-    t = np.arange(n) / sr
-    f = freq
-    saw = 2 * ((t * f) % 1.0) - 1
-    sub = np.sin(2 * np.pi * (f / 2) * t)   # true sub, below the 60-120 scoop
-    env = np.exp(-t * 20)
-    stab = (0.5 * saw + 1.0 * sub) * env
-    return np.tanh(stab * 3.0) * 0.8
-
-
-def make_hat(dur, open_hat=False, sr=SR):
-    n = int(dur * sr)
-    t = np.arange(n) / sr
-    noise = np.random.default_rng(7 if open_hat else 11).uniform(-1, 1, n)
-    # crude highpass: single difference filter (twice was all sizzle >8k)
-    noise = np.diff(noise, prepend=0.0)
-    noise /= max(np.max(np.abs(noise)), 1e-9)
-    decay = 4.0 if open_hat else 35.0
-    return noise * np.exp(-t * decay)
-
-
 def sidechain_env(n_samples, beat_samples, sr=SR, floor=0.35):
-    """Per-beat ducking envelope: dips to `floor` on each kick, recovers by the offbeat."""
-    one = np.ones(beat_samples)
+    """Per-beat ducking envelope, with the first sample on a kick transient."""
     duck_len = int(beat_samples * 0.5)
-    duck = floor + (1.0 - floor) * (np.linspace(0, 1, duck_len) ** 2)
-    one[:duck_len] = duck
-    reps = n_samples // beat_samples + 1
-    return np.tile(one, reps)[:n_samples]
+    phase = np.arange(n_samples) % beat_samples
+    env = np.ones(n_samples)
+    in_duck = phase < duck_len
+    env[in_duck] = floor + (1.0 - floor) * (phase[in_duck] / duck_len) ** 2
+    return env
 
 
-def load_samples(root_midi, sr=SR):
-    """Load real hardtekk samples from samples/; kick gets pitched from C to the song root."""
+def load_samples(sr=SR):
+    """Load the real hardtekk samples from samples/, each at its NATIVE pitch.
+
+    The kick sample is in C and stays in C — pitch-shifting it up to the song's
+    key is what made it sound thin and too high, so we don't retune it at all.
+    """
     sdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
 
     def load(name):
@@ -152,33 +112,12 @@ def load_samples(root_midi, sr=SR):
         hot = np.flatnonzero(np.abs(y) > 0.05)
         return y[hot[0]:] if len(hot) else y
 
-    kick = load("kick-hardtekk_C.wav")
-    if kick is not None:
-        # sample is in C; shift to song root (nearest, within +/-6 semitones)
-        steps = ((root_midi - 0) % 12)
-        if steps > 6:
-            steps -= 12
-        if steps:
-            kick = librosa.effects.pitch_shift(kick, sr=sr, n_steps=steps)
     return {
-        "kick": kick,
+        "kick": load("kick-hardtekk_C.wav"),
         "kick_alt": load("hardtekk-kicks-tension-rebellious.wav"),
         "snare": load("snare-hardtekk-distorted-punch_D#_major.wav"),
         "bell": load("hardtekk-bell-shot.wav"),
     }
-
-
-def make_riser(dur, sr=SR):
-    """White-noise riser with rising pitch tone for build-ups."""
-    n = int(dur * sr)
-    t = np.arange(n) / sr
-    noise = np.random.default_rng(5).uniform(-1, 1, n)
-    noise = np.diff(noise, prepend=0.0)
-    noise /= max(np.max(np.abs(noise)), 1e-9)
-    amp = (t / dur) ** 2
-    f = 200 + 1800 * (t / dur) ** 2
-    tone = np.sin(2 * np.pi * np.cumsum(f) / sr)
-    return (noise * 0.7 + tone * 0.3) * amp
 
 
 def plan_sections(n_bars):
@@ -297,46 +236,30 @@ def find_surges(score, w=4, min_sep=8, max_drops=3, min_jump=0.06):
 
 
 def detect_grid(y, target_bpm, sr=SR, hop=512):
-    """Find the exact beat period AND phase that best align a click grid to the
-    song's onsets, searching a tight range around the target. The audio is
-    stretched *toward* target_bpm but rarely lands exactly on it (the source BPM
-    estimate is imperfect), so a hard-coded target grid drifts ~1% and walks out
-    of time over the track. Measuring the true period here keeps us locked.
+    """Return the requested beat period and its best downbeat phase.
 
-    Searching only ±11% around the target sidesteps the beat-tracker's octave
-    confusion: a half/two-thirds-tempo grid also fits the onsets but isn't ours.
+    Time-stretching establishes the tempo. Fitting another period to beat
+    tracker output lets small detection errors accumulate into drift, so only
+    the phase is measured here.
     """
-    fallback_bs = int(60.0 / target_bpm * sr)
-    _, beats = librosa.beat.beat_track(y=y, sr=sr, units="samples")
-    beats = np.asarray(beats, dtype=float)
-    if len(beats) < 8:
-        return fallback_bs, 0
+    bs = int(round(60.0 / target_bpm * sr))
+    barlen = bs * 4
+    onset = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+    if len(onset) < 4:
+        return bs, 0
 
-    # Assign each (jittery) detected beat to an integer grid index, then
-    # least-squares fit  beat ≈ A + bs·index. This fits ONE constant tempo to the
-    # whole track, averaging out per-beat jitter and (unlike a single global
-    # estimate) minimizing total phase error, so the grid doesn't drift.
-    bs = 60.0 / target_bpm * sr
-    A = beats[0]
-    for _ in range(5):
-        idx = np.round((beats - A) / bs)
-        # drop duplicate indices (tracker doubled a beat) to keep the fit clean
-        _, uniq = np.unique(idx, return_index=True)
-        bi, ii = beats[uniq], idx[uniq]
-        M = np.vstack([np.ones_like(ii), ii]).T
-        (A, bs), *_ = np.linalg.lstsq(M, bi, rcond=None)
-        resid = bi - (A + bs * ii)
-        keep = np.abs(resid) < 0.3 * bs
-        if keep.sum() >= 4:
-            M = np.vstack([np.ones_like(ii[keep]), ii[keep]]).T
-            (A, bs), *_ = np.linalg.lstsq(M, bi[keep], rcond=None)
+    def energy(sample):
+        frame = sample / hop
+        return float(np.interp(frame, np.arange(len(onset)), onset, left=0.0, right=0.0))
 
-    grid_bpm = 60.0 * sr / bs
-    if not (target_bpm * 0.85 < grid_bpm < target_bpm * 1.15):
-        return fallback_bs, 0  # fit went sideways; trust the stretch target
-    bs = int(round(bs))
-    offset = int(round(A)) % (bs * 4)
-    return bs, offset
+    best_offset, best_score = 0, -np.inf
+    for offset in range(0, barlen, hop):
+        score = 0.0
+        for sample in range(offset, len(y), bs):
+            score += energy(sample) * (1.25 if ((sample - offset) // bs) % 4 == 0 else 1.0)
+        if score > best_score:
+            best_offset, best_score = offset, score
+    return bs, best_offset % barlen
 
 
 def analyze_structure(y, bpm, offset=0, sr=SR):
@@ -434,35 +357,27 @@ def structure_map(high, drops):
     return row + "\n  " + mark
 
 
-def build_arrangement(n_samples, bpm, root_midi, sections, offset=0, sr=SR):
+def build_arrangement(n_samples, bpm, sections, offset=0, sr=SR):
     """Return (drums, song_gain, song_filter_regions, drop_starts). Bars are placed
-    starting at `offset` so the whole arrangement is phase-locked to the song."""
+    starting at `offset` so the whole arrangement is phase-locked to the song.
+
+    Sample-only: every voice below is a real sample (or derived from one). There
+    are no synth oscillators, so nothing is tuned to the song's key."""
     beat = 60.0 / bpm
     bs = int(beat * sr)
-    freq = librosa.midi_to_hz(root_midi)
 
-    smp = load_samples(root_midi, sr)
-    synth_kick = make_kick(freq, beat * 0.95)
-    kick = smp["kick"] if smp["kick"] is not None else synth_kick
-    kick = np.copy(kick[: int(beat * 0.45 * sr)])  # tight: gaps make punch
-    if smp["kick"] is not None:
-        # the sample's energy peaks ~75 ms in; layer the synth kick's instant
-        # transient under it so the hit lands ON the beat and punches harder
-        m = min(len(kick), len(synth_kick))
-        kick[:m] = np.tanh(kick[:m] + synth_kick[:m] * 0.7)
-    # tekk kicks live in the mids: hard second distortion stage folds the
-    # fundamental into harmonics (reference kick has almost no 60-120Hz energy)
+    smp = load_samples(sr)
+    if smp["kick"] is None:
+        raise SystemExit("samples/kick-hardtekk_C.wav is required (sample-only mode).")
+    kick = np.copy(smp["kick"][: int(beat * 0.45 * sr)])  # tight: gaps make punch
+    # tekk kicks live in the mids: hard distortion folds the sample's fundamental
+    # into harmonics (reference kick has almost no 60-120Hz energy)
     kick = np.tanh(kick * 3.0) * 0.95
-    # ...plus a clean sub-octave sine underneath (reference keeps real <60Hz)
-    t_k = np.arange(len(kick)) / sr
-    kick = kick + np.sin(2 * np.pi * (freq / 2) * t_k) * np.exp(-t_k * 10.0) * 0.65
     dbl_kick = kick[: bs // 2]  # short kick for double-kick 8ths
-    # tekk bassline = the kick itself, lowpassed and short, on 16ths
+    # tekk bassline = the kick sample itself, lowpassed and short, on 16ths
     stab = sosfilt(butter(2, 250, "lp", fs=SR, output="sos"),
                    kick[: int(beat * 0.22 * sr)])
     stab = stab / max(np.max(np.abs(stab)), 1e-9) * 0.9
-    chat = make_hat(0.05)
-    ohat = make_hat(0.18, open_hat=True)
     snare = smp["snare"]
     kick_alt = smp["kick_alt"][: int(beat * 0.45 * sr)] if smp["kick_alt"] is not None else None
     bell = smp["bell"]
@@ -476,8 +391,10 @@ def build_arrangement(n_samples, bpm, root_midi, sections, offset=0, sr=SR):
     drums = np.zeros(n_samples + pad)
     # Song stays present the whole time; sidechain only ducks, never mutes.
     song_gain = np.full(n_samples + pad, 1.0)
-    # duck rolled by offset so ducking troughs land on the phase-locked kicks
-    duck = np.roll(sidechain_env(len(drums), bs, floor=0.35), offset)
+    # Evaluate phase from the same offset used by every drum event. Rolling a
+    # finite envelope wraps its last duck into the start of the track.
+    duck_base = sidechain_env(len(drums), bs, floor=0.35)
+    duck = duck_base[(np.arange(len(drums)) - offset) % bs]
     filter_regions = []
     drop_regions = []
     drop_starts = []
@@ -498,12 +415,8 @@ def build_arrangement(n_samples, bpm, root_midi, sections, offset=0, sr=SR):
         variant = kind[1] if isinstance(kind, tuple) else 0
 
         if name == "intro":
+            # no hats (sample-only): the intro is just the song, untouched
             song_gain[s0:s1] = 1.0
-            half = bar + bars // 2
-            for b in range(half * 4, (bar + bars) * 4):
-                i = b * bs
-                for s in range(4):  # soft 16th hats sneak in
-                    put(drums, i + (s * bs) // 4, chat, 0.12)
 
         elif name == "build":
             filter_regions.append((s0, s1))
@@ -522,11 +435,8 @@ def build_arrangement(n_samples, bpm, root_midi, sections, offset=0, sr=SR):
                 if snare is not None:
                     for s in range(divs):
                         put(drums, i + (s * bs) // divs, snare, 0.22 + 0.2 * frac)
-            # riser only over the last 2 bars, quiet — a constant noise swell
-            # reads as onset density and buries the drop's arrival
-            r_bars = min(2, bars)
-            riser = make_riser(r_bars * 4 * beat)
-            put(drums, s1 - r_bars * 4 * bs, riser, 0.25)
+            # (no riser: sample-only — the snare build + the breath below carry
+            # the tension into the drop)
             # short half-beat breath before the drop (dip, not a hard cut)
             gap0 = max(s1 - bs // 2, s0)
             drums[gap0:s1] = 0.0
@@ -576,19 +486,12 @@ def build_arrangement(n_samples, bpm, root_midi, sections, offset=0, sr=SR):
                 if on_beat:
                     for s16, amp16 in ((1, 0.75), (2, 1.0), (3, 0.85)):
                         put(drums, i + (s16 * bs) // 4, stab, amp16 * amp)
-                if e % 2 == 1:
-                    put(drums, i, ohat, 0.40)  # offbeat open hat
-
-                # closed hats: 16ths on even drops, 8ths on odd (breathing room)
-                put(drums, i, chat, 0.30 if on_beat else 0.20)
+                # (no hats: sample-only — kick + bass + snare carry the drop)
 
         elif name == "break":
             # drums drop out, song comes forward and breathes
             song_gain[s0:s1] = 1.0
             put(drums, s0, bell, 0.35)
-            for b in range(bars * 4):
-                if b % 2 == 1:
-                    put(drums, s0 + b * bs + bs // 2, ohat, 0.18)
 
         bar += bars
 
@@ -628,7 +531,7 @@ def hardtekk(in_path, out_path, target_bpm=None, drop_at=None):
     y = y / max(np.max(np.abs(y)), 1e-9)
 
     bpm = detect_bpm(y, SR)
-    key, mode, root_midi = detect_key(y, SR)
+    key, mode, _ = detect_key(y, SR)  # key/mode for display only; nothing is tuned now
     print(f"  Detected: {bpm:.1f} BPM, key {key} {mode}")
 
     if target_bpm is None:
@@ -675,7 +578,7 @@ def hardtekk(in_path, out_path, target_bpm=None, drop_at=None):
     print("  " + structure_map(high, drops).replace("\n", "\n  "))
 
     drums, song_gain, filter_regions, drop_regions, drop_starts = build_arrangement(
-        len(y), grid_bpm, root_midi, sections, offset)
+        len(y), grid_bpm, sections, offset)
     print(f"  {len(high)} bars, {len(drop_starts)} hardtekk drop(s) at "
           + ", ".join(f"{s/SR:.0f}s" for s in drop_starts))
 
