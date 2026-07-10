@@ -267,7 +267,8 @@ a#dl:hover { background: var(--plum); color: var(--paper); }
 
     <div class="card controls">
       <div class="ctl">
-        <span class="label">target tempo — <span id="bpmval">180</span> bpm</span>
+        <span class="label"><label><input type="checkbox" id="auto" checked> auto tempo (clean speed-up, like the pros)</label></span>
+        <span class="label">manual — <span id="bpmval">180</span> bpm</span>
         <input type="range" id="bpm" min="150" max="200" value="180" step="1">
       </div>
       <div class="ctl">

@@ -44,8 +44,11 @@ def detect_key(y, sr):
             if score > best[0]:
                 best = (score, shift, mode)
     _, root, mode = best
-    # Put the kick root in a club-friendly octave (F1..E2 range)
-    midi = 29 + ((root - 5) % 12)  # F1 = 29
+    # Tekk kicks punch in the low mids, not the sub: pick the octave of the
+    # root whose fundamental lands closest to ~137 Hz (measured off a
+    # reference hardtekk master — its kick fundamental sits at C#3).
+    cands = [root + 36, root + 48]  # C2..B2 / C3..B3 octaves
+    midi = min(cands, key=lambda m: abs(librosa.midi_to_hz(m) - 137.0))
     return KEYS[root], mode, midi
 
 
@@ -66,12 +69,24 @@ def soft_clip(x, drive=1.0):
     return np.tanh(x * drive) / np.tanh(drive)
 
 
+def eq_peak(x, f0, gain_db, q=0.9, sr=SR):
+    """RBJ peaking EQ (used to scoop the 60-120Hz mud out of the drum bus,
+    matching the notch measured on the reference master)."""
+    A = 10 ** (gain_db / 40)
+    w0 = 2 * np.pi * f0 / sr
+    alpha = np.sin(w0) / (2 * q)
+    b = np.array([1 + alpha * A, -2 * np.cos(w0), 1 - alpha * A])
+    a = np.array([1 + alpha / A, -2 * np.cos(w0), 1 - alpha / A])
+    from scipy.signal import lfilter
+    return lfilter(b / a[0], a / a[0], x)
+
+
 def make_kick(freq, beat_len, sr=SR):
     """Distorted hardtekk kick: fast pitch-sweep sine into hard saturation."""
     n = int(beat_len * sr)
     t = np.arange(n) / sr
     # exponential pitch envelope: start high, drop to root fast
-    f_start, f_end = 220.0, freq
+    f_start, f_end = max(freq * 2.5, 220.0), freq
     sweep = f_end + (f_start - f_end) * np.exp(-t * 55)
     phase = 2 * np.pi * np.cumsum(sweep) / sr
     body = np.sin(phase)
@@ -105,9 +120,8 @@ def make_hat(dur, open_hat=False, sr=SR):
     n = int(dur * sr)
     t = np.arange(n) / sr
     noise = np.random.default_rng(7 if open_hat else 11).uniform(-1, 1, n)
-    # crude highpass: difference filter applied twice
-    for _ in range(2):
-        noise = np.diff(noise, prepend=0.0)
+    # crude highpass: single difference filter (twice was all sizzle >8k)
+    noise = np.diff(noise, prepend=0.0)
     noise /= max(np.max(np.abs(noise)), 1e-9)
     decay = 4.0 if open_hat else 35.0
     return noise * np.exp(-t * decay)
@@ -435,6 +449,12 @@ def build_arrangement(n_samples, bpm, root_midi, sections, offset=0, sr=SR):
         # transient under it so the hit lands ON the beat and punches harder
         m = min(len(kick), len(synth_kick))
         kick[:m] = np.tanh(kick[:m] + synth_kick[:m] * 0.7)
+    # tekk kicks live in the mids: hard second distortion stage folds the
+    # fundamental into harmonics (reference kick has almost no 60-120Hz energy)
+    kick = np.tanh(kick * 3.0) * 0.95
+    # ...plus a clean sub-octave sine underneath (reference keeps real <60Hz)
+    t_k = np.arange(len(kick)) / sr
+    kick = kick + np.sin(2 * np.pi * (freq / 2) * t_k) * np.exp(-t_k * 9.0) * 0.55
     dbl_kick = kick[: bs // 2]  # short kick for double-kick 8ths
     stab = make_bass_stab(freq, beat * 0.45)
     chat = make_hat(0.05)
@@ -549,11 +569,11 @@ def build_arrangement(n_samples, bpm, root_midi, sections, offset=0, sr=SR):
                         keep = beat_in_bar % 2 == 0
                     if keep:
                         put(drums, i, stab, 0.5 * amp)
-                    put(drums, i, ohat, 0.28)  # offbeat open hat
+                    put(drums, i, ohat, 0.40)  # offbeat open hat
 
                 # closed hats: 16ths on even drops, 8ths on odd (breathing room)
                 if variant % 2 == 0 or on_beat:
-                    put(drums, i, chat, 0.2 if on_beat else 0.13)
+                    put(drums, i, chat, 0.30 if on_beat else 0.20)
 
         elif name == "break":
             # drums drop out, song comes forward and breathes
@@ -586,7 +606,16 @@ def high_from_drops(n_bars, drops):
     return high
 
 
-def hardtekk(in_path, out_path, target_bpm=180.0, drop_at=None):
+def auto_tempo(bpm):
+    """Pick the tekk tempo like the pros do: a clean speed-up ratio of the
+    source (reference remix used exactly 1.25x), landing in 150-195 and as
+    close to ~165 as possible."""
+    cands = [bpm * r for r in (1.0, 1.25, 4 / 3, 1.5, 2.0)]
+    cands = [t for t in cands if 150 <= t <= 195]
+    return min(cands, key=lambda t: abs(t - 165)) if cands else 165.0
+
+
+def hardtekk(in_path, out_path, target_bpm=None, drop_at=None):
     print(f"Loading {os.path.basename(in_path)} ...")
     y, _ = librosa.load(in_path, sr=SR, mono=True)
     y = y / max(np.max(np.abs(y)), 1e-9)
@@ -594,6 +623,10 @@ def hardtekk(in_path, out_path, target_bpm=180.0, drop_at=None):
     bpm = detect_bpm(y, SR)
     key, mode, root_midi = detect_key(y, SR)
     print(f"  Detected: {bpm:.1f} BPM, key {key} {mode}")
+
+    if target_bpm is None:
+        target_bpm = auto_tempo(bpm)
+        print(f"  Auto tempo: {target_bpm:.1f} BPM ({target_bpm / bpm:.2f}x speed-up)")
 
     rate = target_bpm / bpm
     print(f"  Stretching {bpm:.1f} -> {target_bpm:.0f} BPM (rate {rate:.2f}x)")
@@ -639,10 +672,21 @@ def hardtekk(in_path, out_path, target_bpm=180.0, drop_at=None):
         y[a:b] = sosfilt(sos_hp, y[a:b])
 
     print("  Sidechaining + mixing...")
-    # Song sits loud and up front; drums support it rather than bury it.
-    mix = y * song_gain * 0.80 + drums * 0.75
-    mix = soft_clip(mix, drive=1.15)  # gentler saturation = less harsh/jarring
+    # reference master has a hole at 60-120Hz: sub + distorted mids, no mud
+    drums = eq_peak(drums, 90, -9.0)
+    mix = y * song_gain * 0.75 + drums * 0.85
+    # Wall-of-sound master, calibrated to a reference hardtekk release
+    # (RMS ~0.42, crest ~3.6, mids+highs carry 75% of the energy):
+    # bright shelf above ~2k, then push into the clipper until it's LOUD.
+    sos_hi = butter(1, [2000, 8000], "bp", fs=SR, output="sos")
+    mix = mix + 1.3 * sosfilt(sos_hi, mix)
+    rms = np.sqrt(np.mean(mix ** 2))
+    g = float(np.clip(0.45 / max(rms, 1e-9), 0.8, 6.0))
+    mix = soft_clip(mix * g, drive=1.6)
+    # tame the clipper's >8k harmonics (reference has only ~12% up there)
+    mix = sosfilt(butter(2, 11000, "lp", fs=SR, output="sos"), mix)
     mix = mix / max(np.max(np.abs(mix)), 1e-9) * 0.97
+    print(f"  master: gain {g:.2f}x into clipper, RMS {np.sqrt(np.mean(mix**2)):.2f}")
 
     sf.write(out_path, mix.astype(np.float32), SR)
     print(f"  -> {out_path}")
@@ -652,7 +696,8 @@ def hardtekk(in_path, out_path, target_bpm=180.0, drop_at=None):
 def main():
     p = argparse.ArgumentParser(description="Hardtekk remix generator")
     p.add_argument("song", help="input audio file (mp3/wav/m4a/flac/ogg)")
-    p.add_argument("--bpm", type=float, default=180.0, help="target tekk BPM (default 180)")
+    p.add_argument("--bpm", type=float, default=None,
+                   help="target tekk BPM (default: auto — a clean speed-up ratio near 165)")
     p.add_argument("--drop-at", default=None,
                    help="comma-separated remix-timeline seconds to force drops, "
                         "e.g. --drop-at 30,72 (overrides auto-detection)")
@@ -670,7 +715,8 @@ def main():
         base = os.path.splitext(os.path.basename(args.song))[0]
         outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
         os.makedirs(outdir, exist_ok=True)
-        out = os.path.join(outdir, f"{base}_hardtekk_{int(args.bpm)}bpm.wav")
+        tag = f"{int(args.bpm)}bpm" if args.bpm else "auto"
+        out = os.path.join(outdir, f"{base}_hardtekk_{tag}.wav")
     hardtekk(args.song, out, args.bpm, drop_at=drop_at)
 
 

@@ -137,7 +137,12 @@ function detectKey(chroma) {
       if (s > best.score) best = { score: s, root: shift, mode };
     }
   }
-  const midi = 29 + (((best.root - 5) % 12) + 12) % 12;   // F1..E2 club octave
+  // Tekk kicks punch in the low mids, not the sub: pick the octave of the
+  // root whose fundamental lands closest to ~137 Hz (measured off a
+  // reference hardtekk master).
+  const hz = m => 440 * Math.pow(2, (m - 69) / 12);
+  const midi = [best.root + 36, best.root + 48]
+    .reduce((a, b) => (Math.abs(hz(a) - 137) < Math.abs(hz(b) - 137) ? a : b));
   return { key: KEYS[best.root], mode: best.mode, rootMidi: midi };
 }
 
@@ -178,7 +183,7 @@ function makeKick(freq, beatLen, sr) {
   const n = Math.floor(beatLen * sr);
   const out = new Float32Array(n);
   let phase = 0;
-  const fStart = 220;
+  const fStart = Math.max(freq * 2.5, 220);
   for (let i = 0; i < n; i++) {
     const t = i / sr;
     const f = freq + (fStart - freq) * Math.exp(-t * 55);
@@ -213,7 +218,7 @@ function makeHat(dur, open, sr) {
   const rng = mulberry(open ? 7 : 11);
   let noise = new Float32Array(n);
   for (let i = 0; i < n; i++) noise[i] = rng() * 2 - 1;
-  for (let pass = 0; pass < 2; pass++) {       // crude highpass: diff twice
+  {                       // crude highpass: single diff (twice was all sizzle)
     const d = new Float32Array(n);
     for (let i = 1; i < n; i++) d[i] = noise[i] - noise[i - 1];
     noise = d;
@@ -465,6 +470,13 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
     for (let i = 0; i < m; i++) kick[i] = Math.tanh(kick[i] + synthKick[i] * 0.7);
   } else kick = synthKick;
   kick = kick.slice(0, Math.floor(beat * 0.95 * sr));
+  // tekk kicks live in the mids: hard second distortion stage folds the
+  // fundamental into harmonics, plus a clean sub-octave sine underneath
+  for (let i = 0; i < kick.length; i++) {
+    const t = i / sr;
+    kick[i] = Math.tanh(kick[i] * 3) * 0.95 +
+      Math.sin(2 * Math.PI * (freq / 2) * t) * Math.exp(-t * 9) * 0.55;
+  }
   const stab = makeBassStab(freq, beat * 0.45, sr);
   const chat = makeHat(0.05, false, sr);
   const ohat = makeHat(0.18, true, sr);
@@ -546,9 +558,9 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
           let keep = true;
           if (variant % 3 === 2) keep = beatInBar % 2 === 0;
           if (keep) put(drums, i, stab, 0.5 * amp);
-          put(drums, i, ohat, 0.28);
+          put(drums, i, ohat, 0.40);
         }
-        if (variant % 2 === 0 || onBeat) put(drums, i, chat, onBeat ? 0.2 : 0.13);
+        if (variant % 2 === 0 || onBeat) put(drums, i, chat, onBeat ? 0.30 : 0.20);
       }
       dropIndex++;
     } else if (name === "break") {
@@ -565,19 +577,38 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
   };
 }
 
-// RBJ biquad highpass, applied in place
-function biquadHP(x, a, b, fc, sr) {
-  const w0 = 2 * Math.PI * fc / sr, q = 0.707;
-  const alpha = Math.sin(w0) / (2 * q), cw = Math.cos(w0);
-  const b0 = (1 + cw) / 2, b1 = -(1 + cw), b2 = (1 + cw) / 2;
-  const a0 = 1 + alpha, a1 = -2 * cw, a2 = 1 - alpha;
+// RBJ biquads, applied in place over [a, b)
+function biquadRun(x, a, b, c) {
   let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
   for (let i = a; i < b; i++) {
     const xn = x[i];
-    const yn = (b0 * xn + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0;
+    const yn = (c.b0 * xn + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2) / c.a0;
     x2 = x1; x1 = xn; y2 = y1; y1 = yn;
     x[i] = yn;
   }
+}
+
+function biquadHP(x, a, b, fc, sr, q = 0.707) {
+  const w0 = 2 * Math.PI * fc / sr;
+  const alpha = Math.sin(w0) / (2 * q), cw = Math.cos(w0);
+  biquadRun(x, a, b, { b0: (1 + cw) / 2, b1: -(1 + cw), b2: (1 + cw) / 2,
+                       a0: 1 + alpha, a1: -2 * cw, a2: 1 - alpha });
+}
+
+function biquadLP(x, a, b, fc, sr, q = 0.707) {
+  const w0 = 2 * Math.PI * fc / sr;
+  const alpha = Math.sin(w0) / (2 * q), cw = Math.cos(w0);
+  biquadRun(x, a, b, { b0: (1 - cw) / 2, b1: 1 - cw, b2: (1 - cw) / 2,
+                       a0: 1 + alpha, a1: -2 * cw, a2: 1 - alpha });
+}
+
+// peaking EQ (used to scoop 60-120Hz mud out of the drum bus)
+function biquadPeak(x, fc, gainDb, q, sr) {
+  const A = Math.pow(10, gainDb / 40);
+  const w0 = 2 * Math.PI * fc / sr;
+  const alpha = Math.sin(w0) / (2 * q), cw = Math.cos(w0);
+  biquadRun(x, 0, x.length, { b0: 1 + alpha * A, b1: -2 * cw, b2: 1 - alpha * A,
+                              a0: 1 + alpha / A, a1: -2 * cw, a2: 1 - alpha / A });
 }
 
 function highpassSweep(y, s0, s1, sr, fStart = 120, fEnd = 1400) {
@@ -682,8 +713,17 @@ async function generate(file, targetBPM, dropAt, log) {
   log(`  detected: <span class="hi">${bpm.toFixed(1)} BPM</span>, key <span class="hi">${key} ${mode}</span>`);
   await yield_();
 
+  if (!targetBPM) {
+    // pick the tekk tempo like the pros: a clean speed-up ratio of the source
+    // (reference remix used exactly 1.25x), landing in 150-195 near ~165
+    const cands = [1, 1.25, 4 / 3, 1.5, 2].map(r => bpm * r).filter(t => t >= 150 && t <= 195);
+    targetBPM = cands.length
+      ? cands.reduce((a, b) => (Math.abs(a - 165) < Math.abs(b - 165) ? a : b))
+      : 165;
+    log(`  auto tempo: <span class="hi">${targetBPM.toFixed(1)} BPM</span> (${(targetBPM / bpm).toFixed(2)}x speed-up)`);
+  }
   const rate = targetBPM / bpm;
-  log(`  speeding up ${bpm.toFixed(1)} → ${targetBPM} BPM (${rate.toFixed(2)}x)`);
+  log(`  speeding up ${bpm.toFixed(1)} → ${targetBPM.toFixed(1)} BPM (${rate.toFixed(2)}x)`);
   mono = await speedUp(mono, sr, rate);
   await yield_();
 
@@ -724,16 +764,28 @@ async function generate(file, targetBPM, dropAt, log) {
   await yield_();
 
   log("sidechaining + mixing ...");
+  // reference master has a hole at 60-120Hz: sub + distorted mids, no mud
+  biquadPeak(drums, 90, -9, 0.9, sr);
   const mix = new Float32Array(mono.length);
-  const drive = 1.15, td = Math.tanh(drive);
+  for (let i = 0; i < mix.length; i++)
+    mix[i] = mono[i] * songGain[i] * 0.75 + drums[i] * 0.85;
+  // wall-of-sound master calibrated to a reference hardtekk release:
+  // bright 2-8k boost, push into the clipper until LOUD, cap the fizz at 11k
+  const bright = mix.slice();
+  biquadHP(bright, 0, bright.length, 2000, sr);
+  biquadLP(bright, 0, bright.length, 8000, sr);
+  let rms = 0;
+  for (let i = 0; i < mix.length; i++) { mix[i] += 1.3 * bright[i]; rms += mix[i] * mix[i]; }
+  rms = Math.sqrt(rms / mix.length);
+  const g = Math.min(Math.max(0.45 / Math.max(rms, 1e-9), 0.8), 6.0);
+  const drive = 1.6, td = Math.tanh(drive);
+  for (let i = 0; i < mix.length; i++) mix[i] = Math.tanh(mix[i] * g * drive) / td;
+  biquadLP(mix, 0, mix.length, 11000, sr);
   let mx = 1e-9;
-  for (let i = 0; i < mix.length; i++) {
-    mix[i] = Math.tanh((mono[i] * songGain[i] * 0.80 + drums[i] * 0.75) * drive) / td;
-    mx = Math.max(mx, Math.abs(mix[i]));
-  }
+  for (const v of mix) mx = Math.max(mx, Math.abs(v));
   for (let i = 0; i < mix.length; i++) mix[i] = mix[i] / mx * 0.97;
 
-  return { blob: encodeWav(mix, sr), sr };
+  return { blob: encodeWav(mix, sr), sr, bpm: targetBPM };
 }
 
 /* ---------------- UI ---------------- */
@@ -769,12 +821,13 @@ $("go").addEventListener("click", async () => {
   const log = html => { logEl.innerHTML += html + "\n"; };
   try {
     const dropAt = $("dropat").value.split(",").map(s => parseFloat(s)).filter(v => isFinite(v) && v >= 0);
-    const { blob } = await generate(currentFile, parseInt($("bpm").value, 10), dropAt, log);
+    const target = $("auto").checked ? null : parseInt($("bpm").value, 10);
+    const { blob, bpm } = await generate(currentFile, target, dropAt, log);
     const url = URL.createObjectURL(blob);
     $("player").src = url;
     const base = currentFile.name.replace(/\.[^.]+$/, "");
     $("dl").href = url;
-    $("dl").download = `${base}_hardtekk_${$("bpm").value}bpm.wav`;
+    $("dl").download = `${base}_hardtekk_${Math.round(bpm)}bpm.wav`;
     $("result").style.display = "flex";
     log('<span class="hi">done — press play.</span>');
   } catch (err) {
