@@ -470,18 +470,26 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
     for (let i = 0; i < m; i++) kick[i] = Math.tanh(kick[i] + synthKick[i] * 0.7);
   } else kick = synthKick;
   kick = kick.slice(0, Math.floor(beat * 0.95 * sr));
+  kick = kick.slice(0, Math.floor(beat * 0.45 * sr));  // tight: gaps make punch
   // tekk kicks live in the mids: hard second distortion stage folds the
   // fundamental into harmonics, plus a clean sub-octave sine underneath
   for (let i = 0; i < kick.length; i++) {
     const t = i / sr;
     kick[i] = Math.tanh(kick[i] * 3) * 0.95 +
-      Math.sin(2 * Math.PI * (freq / 2) * t) * Math.exp(-t * 9) * 0.55;
+      Math.sin(2 * Math.PI * (freq / 2) * t) * Math.exp(-t * 10) * 0.65;
   }
-  const stab = makeBassStab(freq, beat * 0.45, sr);
+  // tekk bassline = the kick itself, lowpassed and short, on 16ths
+  const stab = Float32Array.from(kick.slice(0, Math.floor(beat * 0.22 * sr)));
+  biquadLP(stab, 0, stab.length, 250, sr);
+  {
+    let smx = 1e-9;
+    for (const v of stab) smx = Math.max(smx, Math.abs(v));
+    for (let i = 0; i < stab.length; i++) stab[i] = stab[i] / smx * 0.9;
+  }
   const chat = makeHat(0.05, false, sr);
   const ohat = makeHat(0.18, true, sr);
   const snare = samples.snare;
-  const kickAlt = samples.kickAlt ? samples.kickAlt.slice(0, Math.floor(beat * 0.95 * sr)) : null;
+  const kickAlt = samples.kickAlt ? samples.kickAlt.slice(0, Math.floor(beat * 0.45 * sr)) : null;
   const bell = samples.bell;
 
   const eighth = Math.floor(beatSamples / 2);
@@ -513,17 +521,19 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
       }
     } else if (name === "build") {
       filterRegions.push([s0, s1]);
-      for (let i = s0; i < s1; i++) songGain[i] = 0.9 + 0.1 * (i - s0) / (s1 - s0);
+      // song pulled back hard, NO kick: the low end must vanish before the
+      // drop so the kick's return IS the drop; build stays calmer than drop
+      for (let i = s0; i < s1; i++) songGain[i] = 0.6 + 0.15 * (i - s0) / (s1 - s0);
       const totalBeats = bars * 4;
       for (let b = 0; b < totalBeats; b++) {
         const i = s0 + b * beatSamples;
-        if (b < totalBeats - 2) put(drums, i, kick, 0.75);
         const frac = b / totalBeats;
-        const divs = frac < 0.5 ? 2 : frac < 0.8 ? 4 : 8;
+        const divs = frac < 0.6 ? 2 : 4;
         if (snare) for (let s = 0; s < divs; s++)
-          put(drums, i + Math.floor(s * beatSamples / divs), snare, 0.3 + 0.35 * frac);
+          put(drums, i + Math.floor(s * beatSamples / divs), snare, 0.22 + 0.2 * frac);
       }
-      put(drums, s0, makeRiser(bars * 4 * beat, sr), 0.45);
+      const rBars = Math.min(2, bars);   // riser only over the last 2 bars, quiet
+      put(drums, s1 - rBars * 4 * beatSamples, makeRiser(rBars * 4 * beat, sr), 0.25);
       const gap0 = Math.max(s1 - (beatSamples >> 1), s0);   // half-beat breath before drop
       const gStart = songGain[gap0];
       for (let i = gap0; i < s1; i++) {
@@ -533,18 +543,19 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
     } else if (name === "drop") {
       dropStarts.push(s0);
       dropRegions.push([s0, s1]);
-      for (let i = s0; i < s1; i++) songGain[i] = duck(i);
+      // song stays slightly tucked through the whole drop: at full volume the
+      // master clipper intermodulates it against the bass and eats the 16ths
+      for (let i = s0; i < s1; i++) songGain[i] = duck(i) * 0.8;
       const rng = mulberry(1000 + dropIndex);
       put(drums, s0, bell, 0.4);
       const totalE = bars * 8;
       for (let e = 0; e < totalE; e++) {
         const i = s0 + e * eighth;
-        const step = e % 16, barIn = e >> 3, phrase8 = e >> 6, posInPhrase = e % 64;
-        let amp = 1.0, idx = KICK_MAIN;
-        if (dropIndex === 0 && barIn < 4) {
-          amp = 0.6 + 0.4 * (barIn / 4);
-          if (barIn < 2) idx = KICK_SPARSE;
-        } else if (posInPhrase >= 48 && (phrase8 % 2 === 1)) idx = KICK_ROLL;
+        const step = e % 16, phrase8 = e >> 6, posInPhrase = e % 64;
+        // slam at full force from beat one — the reference doesn't ease in
+        const amp = 1.0;
+        let idx = KICK_MAIN;
+        if (posInPhrase >= 48 && (phrase8 % 2 === 1)) idx = KICK_ROLL;
         if (idx.includes(step)) {
           let k = kick;
           if (kickAlt && step >= 12 && rng() < 0.5) k = kickAlt;
@@ -552,15 +563,14 @@ function buildArrangement(nSamples, sr, beatSamples, rootMidi, sections, offset,
         }
         const onBeat = e % 2 === 0;
         const beatInBar = (e >> 1) % 4;
-        if (snare && onBeat && (beatInBar === 1 || beatInBar === 3) &&
-            !(dropIndex === 0 && barIn < 2)) put(drums, i, snare, 0.5);
-        if (e % 2 === 1) {
-          let keep = true;
-          if (variant % 3 === 2) keep = beatInBar % 2 === 0;
-          if (keep) put(drums, i, stab, 0.5 * amp);
-          put(drums, i, ohat, 0.40);
-        }
-        if (variant % 2 === 0 || onBeat) put(drums, i, chat, onBeat ? 0.30 : 0.20);
+        if (snare && onBeat && (beatInBar === 1 || beatInBar === 3)) put(drums, i, snare, 0.5);
+        // rolling 16th kickbass between the kicks — the reference's low-band
+        // onsets land on every 16th phase, not just the "and"
+        if (onBeat) {
+          for (const [s16, amp16] of [[1, 0.75], [2, 1.0], [3, 0.85]])
+            put(drums, i + Math.floor(s16 * beatSamples / 4), stab, amp16 * amp);
+        } else put(drums, i, ohat, 0.40);
+        put(drums, i, chat, onBeat ? 0.30 : 0.20);
       }
       dropIndex++;
     } else if (name === "break") {
@@ -611,7 +621,7 @@ function biquadPeak(x, fc, gainDb, q, sr) {
                               a0: 1 + alpha / A, a1: -2 * cw, a2: 1 - alpha / A });
 }
 
-function highpassSweep(y, s0, s1, sr, fStart = 120, fEnd = 1400) {
+function highpassSweep(y, s0, s1, sr, fStart = 150, fEnd = 2400) {
   const n = s1 - s0;
   for (let c = 0; c < 8; c++) {
     const a = s0 + Math.floor(n * c / 8), b = s0 + Math.floor(n * (c + 1) / 8);
@@ -746,6 +756,14 @@ async function generate(file, targetBPM, dropAt, log) {
   } else {
     log("finding the drops ...");
     ({ high, drops } = analyzeStructure(mono, env, sr, beatSamples, offset));
+    // a drop needs a tease: never drop before bar 16
+    if (drops.length && nBars > 24) {
+      drops = [...new Set(drops.map(d => Math.max(d, 16)))].sort((a, b) => a - b);
+      const merged = [drops[0]];
+      for (const d of drops.slice(1)) if (d - merged[merged.length - 1] >= 8) merged.push(d);
+      drops = merged;
+      high = highFromDrops(nBars, drops);
+    }
     sections = drops.length ? planFromStructure(high, drops) : planFixed(nBars);
     if (!drops.length) log("  (no clear drop found — using default arrangement)");
   }
@@ -758,17 +776,18 @@ async function generate(file, targetBPM, dropAt, log) {
     buildArrangement(mono.length, sr, beatSamples, rootMidi, sections, offset, samples);
   for (const [a, b] of filterRegions) highpassSweep(mono, a, b, sr);
   // carve the song's low end out during drops so the tekk kick owns it
-  for (const [a, b] of dropRegions) { biquadHP(mono, a, b, 110, sr); biquadHP(mono, a, b, 110, sr); }
+  // steep: any low residue smears the low band into a wall and kills the punch
+  for (const [a, b] of dropRegions) { biquadHP(mono, a, b, 160, sr); biquadHP(mono, a, b, 160, sr); }
   if (dropStarts.length)
     log(`  drops land at ${dropStarts.map(s => (s / sr).toFixed(0) + "s").join(", ")}`);
   await yield_();
 
   log("sidechaining + mixing ...");
   // reference master has a hole at 60-120Hz: sub + distorted mids, no mud
-  biquadPeak(drums, 90, -9, 0.9, sr);
+  biquadPeak(drums, 90, -9, 1.4, sr);
   const mix = new Float32Array(mono.length);
   for (let i = 0; i < mix.length; i++)
-    mix[i] = mono[i] * songGain[i] * 0.75 + drums[i] * 0.85;
+    mix[i] = mono[i] * songGain[i] * 0.75 + drums[i] * 1.0;
   // wall-of-sound master calibrated to a reference hardtekk release:
   // bright 2-8k boost, push into the clipper until LOUD, cap the fizz at 11k
   const bright = mix.slice();
@@ -777,8 +796,8 @@ async function generate(file, targetBPM, dropAt, log) {
   let rms = 0;
   for (let i = 0; i < mix.length; i++) { mix[i] += 1.3 * bright[i]; rms += mix[i] * mix[i]; }
   rms = Math.sqrt(rms / mix.length);
-  const g = Math.min(Math.max(0.45 / Math.max(rms, 1e-9), 0.8), 6.0);
-  const drive = 1.6, td = Math.tanh(drive);
+  const g = Math.min(Math.max(0.42 / Math.max(rms, 1e-9), 0.8), 6.0);
+  const drive = 1.35, td = Math.tanh(drive);
   for (let i = 0; i < mix.length; i++) mix[i] = Math.tanh(mix[i] * g * drive) / td;
   biquadLP(mix, 0, mix.length, 11000, sr);
   let mx = 1e-9;
