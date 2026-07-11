@@ -68,6 +68,25 @@ def detect_bpm(y, sr):
     return tempo
 
 
+def remove_drums(y, sr=SR):
+    """Strip the song's own drums, keeping only the harmonic (sustained) stem.
+
+    Two-pass refined HPSS, mirroring hpss_refined() in the web app's stemacle-dsp
+    (and app.js): pass 1 separates with a wide time kernel (sustained harmonic)
+    and a narrow frequency kernel (sharp drum onsets); pass 2 re-runs HPSS on the
+    harmonic and pulls any bin still >60% percussive back out as drums. Removes
+    far more of the song's kit than a single soft-mask pass."""
+    n_fft, hop = 4096, 1024
+    S = librosa.stft(y, n_fft=n_fft, hop_length=hop)
+    # Pass 1: (harmonic time kernel 31, percussive freq kernel 7)
+    mask_h, _ = librosa.decompose.hpss(S, kernel_size=(31, 7), power=2.0, mask=True)
+    H = S * mask_h
+    # Pass 2: re-HPSS the harmonic; reclassify strongly-percussive bins as drums.
+    mask_h2, mask_p2 = librosa.decompose.hpss(H, kernel_size=(31, 7), power=2.0, mask=True)
+    H = np.where(mask_p2 > 0.60, H * mask_h2, H)
+    return librosa.istft(H, hop_length=hop, length=len(y)).astype(y.dtype)
+
+
 def soft_clip(x, drive=1.0):
     return np.tanh(x * drive) / np.tanh(drive)
 
@@ -581,6 +600,12 @@ def hardtekk(in_path, out_path, target_bpm=None, drop_at=None):
         len(y), grid_bpm, sections, offset)
     print(f"  {len(high)} bars, {len(drop_starts)} hardtekk drop(s) at "
           + ", ".join(f"{s/SR:.0f}s" for s in drop_starts))
+
+    # Strip the song's OWN drums (HPSS harmonic stem) so our tekk kit plays over
+    # a clean bed. Done here, after structure analysis, which needs the drums to
+    # find the drops.
+    print("  Removing the song's drums (HPSS)...")
+    y = remove_drums(y)
 
     # highpass-sweep the song during build-ups
     for a, b in filter_regions:

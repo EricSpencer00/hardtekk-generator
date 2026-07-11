@@ -600,6 +600,133 @@ function encodeWav(samples, sr) {
 
 const yield_ = () => new Promise(r => setTimeout(r, 0));
 
+/* ---------------- HPSS drum removal ----------------
+ * Reused from the stemacle "gold master" (github.com/EricSpencer00/stem-player,
+ * app/index.html): complex STFT -> harmonic/percussive soft-mask split via
+ * 17-tap median filtering -> ISTFT. We keep only the HARMONIC stem, which drops
+ * the song's drums so ours sit alone. The ISTFT normalization floor (1.0) is the
+ * fix ported into stemacle-dsp to stop a start-of-playback transient spike. */
+const HP_N = 4096, HP_HOP = 1024, HP_BINS = HP_N / 2 + 1;
+function hpHann(n) {
+  const w = new Float32Array(n);
+  for (let i = 0; i < n; i++) w[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / n);
+  return w;
+}
+function hpFFT(re, im) {
+  const N = re.length;
+  for (let i = 1, j = 0; i < N; i++) { let bit = N >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; } }
+  for (let len = 2; len <= N; len <<= 1) {
+    const a = -2 * Math.PI / len, wr0 = Math.cos(a), wi0 = Math.sin(a);
+    for (let i = 0; i < N; i += len) {
+      let wr = 1, wi = 0;
+      for (let j = 0; j < len >> 1; j++) {
+        const u = i + j, v = u + (len >> 1);
+        const tRe = wr * re[v] - wi * im[v], tIm = wr * im[v] + wi * re[v];
+        re[v] = re[u] - tRe; im[v] = im[u] - tIm; re[u] += tRe; im[u] += tIm;
+        const nr = wr * wr0 - wi * wi0; wi = wr * wi0 + wi * wr0; wr = nr;
+      }
+    }
+  }
+}
+function hpIFFT(re, im) {
+  for (let i = 0; i < im.length; i++) im[i] = -im[i];
+  hpFFT(re, im);
+  const N = re.length;
+  for (let i = 0; i < N; i++) { re[i] /= N; im[i] = -im[i] / N; }
+}
+async function hpStft(sig, win) {
+  const F = Math.floor((sig.length - HP_N) / HP_HOP) + 1;
+  const re = [], im = [], fr = new Float32Array(HP_N), fi = new Float32Array(HP_N);
+  for (let f = 0; f < F; f++) {
+    const s = f * HP_HOP;
+    for (let i = 0; i < HP_N; i++) { fr[i] = (s + i < sig.length ? sig[s + i] : 0) * win[i]; fi[i] = 0; }
+    hpFFT(fr, fi);
+    re.push(new Float32Array(fr.subarray(0, HP_BINS)));
+    im.push(new Float32Array(fi.subarray(0, HP_BINS)));
+    if ((f & 63) === 0) await yield_();
+  }
+  return { re, im, F };
+}
+async function hpIstft(re, im, F, win) {
+  const len = (F - 1) * HP_HOP + HP_N, out = new Float32Array(len), nrm = new Float32Array(len);
+  const fr = new Float32Array(HP_N), fi = new Float32Array(HP_N);
+  for (let f = 0; f < F; f++) {
+    for (let b = 0; b < HP_BINS; b++) { fr[b] = re[f][b]; fi[b] = im[f][b]; }
+    for (let b = 1; b < HP_BINS - 1; b++) { fr[HP_N - b] = fr[b]; fi[HP_N - b] = -fi[b]; }
+    hpIFFT(fr, fi);
+    const s = f * HP_HOP;
+    for (let i = 0; i < HP_N; i++) { out[s + i] += fr[i] * win[i]; nrm[s + i] += win[i] * win[i]; }
+    if ((f & 63) === 0) await yield_();
+  }
+  for (let i = 0; i < len; i++) out[i] /= Math.max(nrm[i], 1.0);  // floor: no edge spike
+  return out;
+}
+async function hpMedFilter(spec, F, B, L, axis) {
+  const out = new Float32Array(F * B), col = new Float32Array(L), h = L >> 1;
+  if (axis === 'h') {
+    for (let b = 0; b < B; b++) {
+      for (let f = 0; f < F; f++) { for (let k = 0; k < L; k++) { const fi = f - h + k; col[k] = (fi >= 0 && fi < F) ? spec[fi * B + b] : 0; } col.sort(); out[f * B + b] = col[h]; }
+      if ((b & 31) === 0) await yield_();
+    }
+  } else {
+    for (let f = 0; f < F; f++) {
+      for (let b = 0; b < B; b++) { for (let k = 0; k < L; k++) { const bi = b - h + k; col[k] = (bi >= 0 && bi < B) ? spec[f * B + bi] : 0; } col.sort(); out[f * B + b] = col[h]; }
+      if ((f & 31) === 0) await yield_();
+    }
+  }
+  return out;
+}
+// Two-pass refined HPSS, harmonic stem only. Port of hpss_refined() in
+// stemacle-dsp: pass 1 uses a wide (31) horizontal kernel for cleaner sustained
+// tracking and a narrow (7) vertical kernel for sharper drum onsets; pass 2
+// re-HPSSes the harmonic output and pulls any cell still >60% percussive back
+// out as drums. Removes far more of the song's kit than the single-pass split.
+async function hpssHarmonic(re, im, F, B) {
+  const mag = new Float32Array(F * B);
+  for (let f = 0; f < F; f++) for (let b = 0; b < B; b++) mag[f * B + b] = re[f][b] ** 2 + im[f][b] ** 2;
+  // Pass 1
+  const h1 = await hpMedFilter(mag, F, B, 31, 'h');   // sustained → harmonic
+  const p1 = await hpMedFilter(mag, F, B, 7, 'v');    // transient → percussive
+  const hRe = re.map(() => new Float32Array(B)), hIm = im.map(() => new Float32Array(B));
+  const hMag = new Float32Array(F * B);
+  for (let f = 0; f < F; f++) for (let b = 0; b < B; b++) {
+    const hh = h1[f * B + b], pp = p1[f * B + b], d = hh + pp + 1e-8, hm = hh / d;
+    hRe[f][b] = re[f][b] * hm; hIm[f][b] = im[f][b] * hm;
+    hMag[f * B + b] = Math.hypot(hRe[f][b], hIm[f][b]);
+  }
+  // Pass 2: re-HPSS the harmonic; reclassify leaked transients as drums.
+  const h2 = await hpMedFilter(hMag, F, B, 31, 'h');
+  const p2 = await hpMedFilter(hMag, F, B, 7, 'v');
+  for (let f = 0; f < F; f++) for (let b = 0; b < B; b++) {
+    const hh = h2[f * B + b], pp = p2[f * B + b], d = hh + pp + 1e-8;
+    if (pp / d > 0.60) { const hm = hh / d; hRe[f][b] *= hm; hIm[f][b] *= hm; }
+  }
+  return { hRe, hIm };
+}
+// instant-attack / 50ms-release peak limiter (masked stems can spike past full scale)
+function hpLimitPeaks(sig, ceiling = 0.98, releaseSamples = Math.round(44100 * 0.05)) {
+  let gain = 1;
+  for (let i = 0; i < sig.length; i++) {
+    const av = Math.abs(sig[i]);
+    const needed = av > ceiling ? ceiling / av : 1;
+    gain = needed < gain ? needed : Math.min(needed, gain + (1 - gain) / releaseSamples);
+    sig[i] *= gain;
+  }
+  return sig;
+}
+// Remove the song's drums: harmonic-only copy, same length as the input.
+async function removeDrums(mono) {
+  const win = hpHann(HP_N);
+  const st = await hpStft(mono, win);
+  if (st.F < 1) return mono;                       // too short to analyze
+  const { hRe, hIm } = await hpssHarmonic(st.re, st.im, st.F, HP_BINS);
+  const rec = await hpIstft(hRe, hIm, st.F, win);
+  hpLimitPeaks(rec);
+  const out = new Float32Array(mono.length);
+  out.set(rec.subarray(0, mono.length));
+  return out;
+}
+
 async function generate(file, targetBPM, dropAt, log) {
   const ctx = new AudioContext();
   log(`loading ${file.name} ...`);
@@ -666,6 +793,12 @@ async function generate(file, targetBPM, dropAt, log) {
   }
   const map = high.map((h, b) => (drops.includes(b) ? '<span class="drop">#</span>' : h ? "#" : ".")).join("");
   log(`  bar map: ${map}`);
+  await yield_();
+
+  // Strip the song's OWN drums (HPSS harmonic stem) so ours play over a clean
+  // bed. Done after structure analysis, which needs the drums to find the drops.
+  log("removing the song's drums (HPSS) — the slow part ...");
+  mono = await removeDrums(mono);
   await yield_();
 
   log(`building arrangement — ${nBars} bars, ${drops.length || "auto"} drop(s) ...`);
