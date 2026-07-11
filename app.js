@@ -346,10 +346,6 @@ function planFixed(nBars) {
 
 /* ---------------- arrangement ---------------- */
 
-const patIdx = p => [...p].flatMap((c, i) => (c === "x" ? [i] : []));
-const KICK_MAIN = patIdx("x.x.x.x.x.x.xxx.");
-const KICK_SPARSE = patIdx("x...x...x...x...");
-const KICK_ROLL = patIdx("x.x.x.x.xxx.xxxx");
 
 function sidechainEnv(n, beatSamples, floor = 0.35) {
   const out = new Float32Array(n);
@@ -400,10 +396,10 @@ function buildArrangement(nSamples, sr, beatSamples, sections, offset, samples) 
   const pad = beatSamples * 12 + (bell ? bell.length : 0);
   const drums = new Float32Array(nSamples + pad);
   const songGain = new Float32Array(nSamples + pad).fill(1);
-  const duckBase = sidechainEnv(drums.length, beatSamples);
+  // shallow floor keeps the song clearly audible while it pumps against the kick
+  const duckBase = sidechainEnv(drums.length, beatSamples, 0.55);
   const duck = i => duckBase[(((i - offset) % drums.length) + drums.length) % drums.length];
   const filterRegions = [], dropRegions = [], dropStarts = [];
-  let dropIndex = 0;
 
   const put = (buf, i, sig, amp) => {
     if (!sig) return;
@@ -417,63 +413,46 @@ function buildArrangement(nSamples, sr, beatSamples, sections, offset, samples) 
     const s1 = Math.min(offset + (bar + bars) * 4 * beatSamples, drums.length);
     if (s1 <= s0) break;
 
-    if (name === "intro") {
-      // no hats (sample-only): the intro is just the song, untouched
-    } else if (name === "build") {
-      filterRegions.push([s0, s1]);
-      // song pulled back hard, NO kick: the low end must vanish before the
-      // drop so the kick's return IS the drop; build stays calmer than drop
-      for (let i = s0; i < s1; i++) songGain[i] = 0.6 + 0.15 * (i - s0) / (s1 - s0);
-      const totalBeats = bars * 4;
-      for (let b = 0; b < totalBeats; b++) {
-        const i = s0 + b * beatSamples;
-        const frac = b / totalBeats;
-        const divs = frac < 0.6 ? 2 : 4;
-        if (snare) for (let s = 0; s < divs; s++)
-          put(drums, i + Math.floor(s * beatSamples / divs), snare, 0.22 + 0.2 * frac);
-      }
-      // (no riser: sample-only — the snare build + the breath below carry the tension)
-      const gap0 = Math.max(s1 - (beatSamples >> 1), s0);   // half-beat breath before drop
-      const gStart = songGain[gap0];
-      for (let i = gap0; i < s1; i++) {
-        drums[i] = 0;
-        songGain[i] = gStart + (0.3 - gStart) * (i - gap0) / Math.max(s1 - gap0, 1);
-      }
-    } else if (name === "drop") {
+    // The kick + offbeat bass NEVER stop: a steady four-on-the-floor
+    // "bass·kick·bass·kick" over the WHOLE song. Sections only change the extras
+    // (snares, fills, bell) and how much the song ducks.
+    const isDrop = name === "drop";
+    if (isDrop) {
       dropStarts.push(s0);
       dropRegions.push([s0, s1]);
-      // song stays slightly tucked through the whole drop: at full volume the
-      // master clipper intermodulates it against the bass and eats the 16ths
-      for (let i = s0; i < s1; i++) songGain[i] = duck(i) * 0.8;
-      const rng = mulberry(1000 + dropIndex);
-      put(drums, s0, bell, 0.4);
-      const totalE = bars * 8;
-      for (let e = 0; e < totalE; e++) {
-        const i = s0 + e * eighth;
-        const step = e % 16, phrase8 = e >> 6, posInPhrase = e % 64;
-        // slam at full force from beat one — the reference doesn't ease in
-        const amp = 1.0;
-        let idx = KICK_MAIN;
-        if (posInPhrase >= 48 && (phrase8 % 2 === 1)) idx = KICK_ROLL;
-        if (idx.includes(step)) {
-          let k = kick;
-          if (kickAlt && step >= 12 && rng() < 0.5) k = kickAlt;
-          put(drums, i, k, amp);
-        }
-        const onBeat = e % 2 === 0;
-        const beatInBar = (e >> 1) % 4;
-        if (snare && onBeat && (beatInBar === 1 || beatInBar === 3)) put(drums, i, snare, 0.5);
-        // rolling 16th kickbass between the kicks — the reference's low-band
-        // onsets land on every 16th phase, not just the "and"
-        if (onBeat) {
-          for (const [s16, amp16] of [[1, 0.75], [2, 1.0], [3, 0.85]])
-            put(drums, i + Math.floor(s16 * beatSamples / 4), stab, amp16 * amp);
-        }
-        // (no hats: sample-only — kick + bass + snare carry the drop)
+      // kick-forward: the song pumps against the kick but stays listenable
+      for (let i = s0; i < s1; i++) songGain[i] = duck(i) * 0.85;
+      put(drums, s0, bell, 0.4);   // bell marks the drop
+    } else if (name === "build") {
+      filterRegions.push([s0, s1]);
+      // sweep + tuck the song into the drop; the kick keeps driving under it
+      for (let i = s0; i < s1; i++) songGain[i] = 0.85 - 0.2 * (i - s0) / (s1 - s0);
+    } else {   // intro / break — song forward, lighter kit (kick still runs)
+      for (let i = s0; i < s1; i++) songGain[i] = 0.9;
+      if (name === "break") put(drums, s0, bell, 0.35);
+    }
+
+    const totalE = bars * 8;   // eighth-note steps (8 per bar)
+    for (let e = 0; e < totalE; e++) {
+      const i = s0 + e * eighth;
+      const onBeat = e % 2 === 0;
+      const beatInBar = (e >> 1) % 4;
+      const lastPhraseBar = ((e >> 3) % 8) === 7;   // last bar of an 8-bar phrase
+
+      if (onBeat) {
+        put(drums, i, kick, 1.0);                   // kick on every beat
+        // sparse 16th roll: drops only, last phrase bar, beats 3-4
+        if (isDrop && lastPhraseBar && beatInBar >= 2)
+          put(drums, i + (beatSamples >> 2), kickAlt || kick, 0.85);
+      } else {
+        put(drums, i, stab, 0.9);                   // offbeat bass thump
       }
-      dropIndex++;
-    } else if (name === "break") {
-      put(drums, s0, bell, 0.35);   // no hats (sample-only)
+
+      // snare backbeat on 2 & 4 — drops carry it; builds ramp it in
+      if (onBeat && (beatInBar === 1 || beatInBar === 3)) {
+        if (isDrop) put(drums, i, snare, 0.5);
+        else if (name === "build") put(drums, i, snare, 0.25 + 0.3 * (e / totalE));
+      }
     }
     bar += bars;
   }
@@ -805,28 +784,28 @@ async function generate(file, targetBPM, dropAt, log) {
   const { drums, songGain, filterRegions, dropRegions, dropStarts } =
     buildArrangement(mono.length, sr, beatSamples, sections, offset, samples);
   for (const [a, b] of filterRegions) highpassSweep(mono, a, b, sr);
-  // carve the song's low end out during drops so the tekk kick owns it
-  // steep: any low residue smears the low band into a wall and kills the punch
-  for (const [a, b] of dropRegions) { biquadHP(mono, a, b, 160, sr); biquadHP(mono, a, b, 160, sr); }
+  // carve the song's low end out during drops so the tekk kick owns it —
+  // gentler cut (120Hz) leaves more of the song's body so it stays listenable
+  for (const [a, b] of dropRegions) { biquadHP(mono, a, b, 120, sr); biquadHP(mono, a, b, 120, sr); }
   if (dropStarts.length)
     log(`  drops land at ${dropStarts.map(s => (s / sr).toFixed(0) + "s").join(", ")}`);
   await yield_();
 
   log("sidechaining + mixing ...");
-  // reference master has a hole at 60-120Hz: sub + distorted mids, no mud
-  biquadPeak(drums, 90, -9, 1.4, sr);
+  // keep the kick's THUMP: only a light 90Hz scoop (was -9, which thinned it)
+  biquadPeak(drums, 90, -4, 1.4, sr);
   const mix = new Float32Array(mono.length);
   for (let i = 0; i < mix.length; i++)
-    mix[i] = mono[i] * songGain[i] * 0.75 + drums[i] * 1.0;
-  // wall-of-sound master calibrated to a reference hardtekk release:
-  // bright 2-8k boost, push into the clipper until LOUD, cap the fizz at 11k
+    mix[i] = mono[i] * songGain[i] * 0.9 + drums[i] * 1.0;   // song forward but under the kit
+  // wall-of-sound master: bright 2-8k boost, push into the clipper until LOUD
+  // (target RMS bumped for more level), cap the fizz at 11k
   const bright = mix.slice();
   biquadHP(bright, 0, bright.length, 2000, sr);
   biquadLP(bright, 0, bright.length, 8000, sr);
   let rms = 0;
   for (let i = 0; i < mix.length; i++) { mix[i] += 1.3 * bright[i]; rms += mix[i] * mix[i]; }
   rms = Math.sqrt(rms / mix.length);
-  const g = Math.min(Math.max(0.42 / Math.max(rms, 1e-9), 0.8), 6.0);
+  const g = Math.min(Math.max(0.46 / Math.max(rms, 1e-9), 0.8), 6.0);
   const drive = 1.35, td = Math.tanh(drive);
   for (let i = 0; i < mix.length; i++) mix[i] = Math.tanh(mix[i] * g * drive) / td;
   biquadLP(mix, 0, mix.length, 11000, sr);

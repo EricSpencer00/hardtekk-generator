@@ -184,18 +184,6 @@ def highpass_sweep(seg, sr=SR, f_start=150, f_end=2400):
     return out
 
 
-# ---- Rhythm patterns -------------------------------------------------------
-# Grid = 8th notes over 2 bars (16 steps). 'x' = kick, '.' = rest.
-# The signature hardtekk kick: steady pulse, then a triplet roll to close the phrase.
-KICK_MAIN = "x.x.x.x.x.x.xxx."   # x.x.x.x.x.x.xxx  (the pattern you described)
-KICK_SPARSE = "x...x...x...x..."  # downbeats only, for easing in / lighter phrases
-KICK_ROLL = "x.x.x.x.xxx.xxxx"    # busier, used sparingly for a fill phrase
-
-
-def pat_idx(pat):
-    return [i for i, c in enumerate(pat) if c == "x"]
-
-
 def smooth_gain(g, sr=SR, ms=30):
     """Moving-average smooth of an automation curve to kill clicks at section edges."""
     w = max(1, int(sr * ms / 1000))
@@ -392,7 +380,6 @@ def build_arrangement(n_samples, bpm, sections, offset=0, sr=SR):
     # tekk kicks live in the mids: hard distortion folds the sample's fundamental
     # into harmonics (reference kick has almost no 60-120Hz energy)
     kick = np.tanh(kick * 3.0) * 0.95
-    dbl_kick = kick[: bs // 2]  # short kick for double-kick 8ths
     # tekk bassline = the kick sample itself, lowpassed and short, on 16ths
     stab = sosfilt(butter(2, 250, "lp", fs=SR, output="sos"),
                    kick[: int(beat * 0.22 * sr)])
@@ -402,22 +389,19 @@ def build_arrangement(n_samples, bpm, sections, offset=0, sr=SR):
     bell = smp["bell"]
 
     eighth = bs // 2
-    main_idx = pat_idx(KICK_MAIN)
-    sparse_idx = pat_idx(KICK_SPARSE)
-    roll_idx = pat_idx(KICK_ROLL)
 
     pad = bs * 4 * 3 + (len(bell) if bell is not None else 0)
     drums = np.zeros(n_samples + pad)
     # Song stays present the whole time; sidechain only ducks, never mutes.
     song_gain = np.full(n_samples + pad, 1.0)
     # Evaluate phase from the same offset used by every drum event. Rolling a
-    # finite envelope wraps its last duck into the start of the track.
-    duck_base = sidechain_env(len(drums), bs, floor=0.35)
+    # finite envelope wraps its last duck into the start of the track. Shallow
+    # floor keeps the song clearly audible while it pumps against the kick.
+    duck_base = sidechain_env(len(drums), bs, floor=0.55)
     duck = duck_base[(np.arange(len(drums)) - offset) % bs]
     filter_regions = []
     drop_regions = []
     drop_starts = []
-    drop_index = 0
 
     def put(buf, i, sig, amp):
         if sig is None:
@@ -433,84 +417,49 @@ def build_arrangement(n_samples, bpm, sections, offset=0, sr=SR):
         name = kind if isinstance(kind, str) else kind[0]
         variant = kind[1] if isinstance(kind, tuple) else 0
 
-        if name == "intro":
-            # no hats (sample-only): the intro is just the song, untouched
-            song_gain[s0:s1] = 1.0
-
-        elif name == "build":
-            filter_regions.append((s0, s1))
-            # pull the song back hard in the build: its own production is
-            # busy, and the drop must be the busiest moment of the track
-            song_gain[s0:s1] = np.linspace(0.6, 0.75, s1 - s0)
-            total_beats = bars * 4
-            # no kick in the build — the low end must vanish before the drop
-            # so the kick's return IS the drop (reference: 11.7x low contrast)
-            for b in range(total_beats):
-                i = s0 + b * bs
-                # keep the build CALMER than the drop (the drop must be the
-                # busiest moment) — snares cap at quarter notes, quieter
-                frac = b / total_beats
-                divs = 2 if frac < 0.6 else 4
-                if snare is not None:
-                    for s in range(divs):
-                        put(drums, i + (s * bs) // divs, snare, 0.22 + 0.2 * frac)
-            # (no riser: sample-only — the snare build + the breath below carry
-            # the tension into the drop)
-            # short half-beat breath before the drop (dip, not a hard cut)
-            gap0 = max(s1 - bs // 2, s0)
-            drums[gap0:s1] = 0.0
-            song_gain[gap0:s1] = np.linspace(song_gain[gap0], 0.3, s1 - gap0)
-
-        elif name == "drop":
+        # The kick + offbeat bass NEVER stop: a steady four-on-the-floor
+        # "bass·kick·bass·kick" over the WHOLE song. Sections only change the
+        # extras (snares, fills, bell) and how much the song ducks.
+        is_drop = (name == "drop")
+        if is_drop:
             drop_starts.append(s0)
             drop_regions.append((s0, s1))
-            # song stays slightly tucked through the whole drop: at full
-            # volume the master clipper intermodulates it against the bass
-            # and eats the offbeat 16ths alive
-            song_gain[s0:s1] = duck[s0:s1] * 0.8
-            rng = np.random.default_rng(1000 + drop_index)
+            # kick-forward: the song pumps against the kick but stays listenable
+            song_gain[s0:s1] = duck[s0:s1] * 0.85
             put(drums, s0, bell, 0.4)  # bell marks the drop
-            total_e = bars * 8  # eighth-note steps in this section
+        elif name == "build":
+            filter_regions.append((s0, s1))
+            # sweep + tuck the song into the drop; the kick keeps driving under it
+            song_gain[s0:s1] = np.linspace(0.85, 0.65, s1 - s0)
+        else:  # intro / break — song forward, lighter kit (kick still runs)
+            song_gain[s0:s1] = 0.9
+            if name == "break":
+                put(drums, s0, bell, 0.35)
 
-            for e in range(total_e):
-                i = s0 + e * eighth
-                step = e % 16          # position in the 2-bar kick pattern
-                bar_in = e // 8        # bar index within the drop
-                phrase8 = e // 64      # 8-bar phrase index
-                pos_in_phrase = e % 64
+        rng = np.random.default_rng(1000 + bar)
+        total_e = bars * 8  # eighth-note steps (8 per bar)
+        for e in range(total_e):
+            i = s0 + e * eighth
+            on_beat = (e % 2 == 0)
+            beat_in_bar = (e // 2) % 4
+            # last bar of every 8-bar phrase → a sparse fill, not the norm
+            last_phrase_bar = ((e // 8) % 8 == 7)
 
-                # slam at full force from beat one — the reference doesn't
-                # ease in, and the first bars ARE the drop moment
-                amp = 1.0
-                idx = main_idx
-                # every 8th phrase-end gets a roll fill (last 2 bars of the phrase)
-                if pos_in_phrase >= 48 and (phrase8 % 2 == 1):
-                    idx = roll_idx
+            if on_beat:
+                put(drums, i, kick, 1.0)                     # kick on every beat
+                # sparse 16th roll: drops only, last phrase bar, beats 3-4
+                if is_drop and last_phrase_bar and beat_in_bar >= 2:
+                    krl = kick_alt if kick_alt is not None else kick
+                    put(drums, i + bs // 4, krl, 0.85)       # one extra 16th
+            else:
+                put(drums, i, stab, 0.9)                     # offbeat bass thump
 
-                if step in idx:
-                    # accent the triplet-roll tail with the alt kick sometimes
-                    k = kick
-                    if kick_alt is not None and step >= 12 and rng.random() < 0.5:
-                        k = kick_alt
-                    put(drums, i, k, amp)
-
-                # snare on beats 2 & 4 (skip during the ease-in bars)
-                on_beat = (e % 2 == 0)
-                beat_in_bar = (e // 2) % 4
-                if snare is not None and on_beat and beat_in_bar in (1, 3):
+            # snare backbeat on 2 & 4 — drops carry it; builds ramp it in
+            if on_beat and beat_in_bar in (1, 3):
+                if is_drop:
                     put(drums, i, snare, 0.5)
-
-                # rolling 16th bassline between the kicks — the reference's
-                # low-band onsets land on every 16th phase, not just the "and"
-                if on_beat:
-                    for s16, amp16 in ((1, 0.75), (2, 1.0), (3, 0.85)):
-                        put(drums, i + (s16 * bs) // 4, stab, amp16 * amp)
-                # (no hats: sample-only — kick + bass + snare carry the drop)
-
-        elif name == "break":
-            # drums drop out, song comes forward and breathes
-            song_gain[s0:s1] = 1.0
-            put(drums, s0, bell, 0.35)
+                elif name == "build":
+                    put(drums, i, snare, 0.25 + 0.3 * (e / max(total_e, 1)))
 
         bar += bars
 
@@ -611,23 +560,22 @@ def hardtekk(in_path, out_path, target_bpm=None, drop_at=None):
     for a, b in filter_regions:
         y[a:b] = highpass_sweep(y[a:b])
 
-    # carve the song's low end out during drops so the tekk kick owns it
-    # (steep: any residue smears the low band into a wall and kills the punch)
-    sos_hp = butter(4, 160, "hp", fs=SR, output="sos")
+    # carve the song's low end out during drops so the tekk kick owns it —
+    # gentler cut (120Hz) leaves more of the song's body so it stays listenable
+    sos_hp = butter(4, 120, "hp", fs=SR, output="sos")
     for a, b in drop_regions:
         y[a:b] = sosfilt(sos_hp, y[a:b])
 
     print("  Sidechaining + mixing...")
-    # reference master has a hole at 60-120Hz: sub + distorted mids, no mud
-    drums = eq_peak(drums, 90, -9.0)
-    mix = y * song_gain * 0.75 + drums * 1.0
-    # Wall-of-sound master, calibrated to a reference hardtekk release
-    # (RMS ~0.42, crest ~3.6, mids+highs carry 75% of the energy):
-    # bright shelf above ~2k, then push into the clipper until it's LOUD.
+    # keep the kick's THUMP: only a light 90Hz scoop (was -9, which thinned it)
+    drums = eq_peak(drums, 90, -4.0)
+    mix = y * song_gain * 0.9 + drums * 1.0    # song forward but under the kit
+    # Wall-of-sound master: bright shelf above ~2k, then push into the clipper
+    # until it's LOUD (target RMS bumped for more level).
     sos_hi = butter(1, [2000, 8000], "bp", fs=SR, output="sos")
     mix = mix + 1.3 * sosfilt(sos_hi, mix)
     rms = np.sqrt(np.mean(mix ** 2))
-    g = float(np.clip(0.42 / max(rms, 1e-9), 0.8, 6.0))
+    g = float(np.clip(0.46 / max(rms, 1e-9), 0.8, 6.0))
     mix = soft_clip(mix * g, drive=1.35)
     # tame the clipper's >8k harmonics (reference has only ~12% up there)
     mix = sosfilt(butter(2, 11000, "lp", fs=SR, output="sos"), mix)
