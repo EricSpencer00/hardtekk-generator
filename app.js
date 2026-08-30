@@ -344,6 +344,75 @@ function planFixed(nBars) {
   return sections;
 }
 
+/* ---------------- the score ---------------- */
+// The arrangement is a score: one row per bar, one lane per voice, 16 steps
+// (sixteenth notes) per bar. Nothing else decides where a hit lands, so the
+// score box prints the whole plan and renders an edited one straight back.
+
+const STEPS = 16;
+const LANES = ["kick", "bass", "snare", "roll", "bell"];
+const HIT = "x", REST = ".";
+
+function scoreFromSections(sections) {
+  const score = [];
+  for (const { name, bars } of sections) {
+    for (let b = 0; b < bars; b++) {
+      const lanes = {};
+      for (const k of LANES) lanes[k] = new Array(STEPS).fill(REST);
+      for (let s = 0; s < STEPS; s += 4) lanes.kick[s] = HIT;   // four on the floor
+      for (let s = 2; s < STEPS; s += 4) lanes.bass[s] = HIT;   // offbeat bass thump
+      if (name === "drop" || name === "build")
+        lanes.snare[4] = lanes.snare[12] = HIT;                 // backbeat on 2 & 4
+      if (name === "drop" && b % 8 === 7)
+        lanes.roll[9] = lanes.roll[13] = HIT;                   // sparse 16th roll
+      if (b === 0 && (name === "drop" || name === "break"))
+        lanes.bell[0] = HIT;                                    // bell marks the section
+      const row = { kind: name, lanes: {} };
+      for (const k of LANES) row.lanes[k] = lanes[k].join("");
+      score.push(row);
+    }
+  }
+  return score;
+}
+
+function formatScore(score, bpm, offset, sr) {
+  const head = [
+    `# hardtekk score: ${score.length} bars at ${bpm.toFixed(1)} bpm, ` +
+    `downbeat ${(offset / sr * 1000).toFixed(0)} ms, ${STEPS} steps per bar`,
+    "# edit a lane, then press generate again to render it back",
+    "#  bar section " + LANES.map(k => k.padEnd(STEPS)).join(" "),
+  ];
+  const rows = score.map((row, b) =>
+    `${String(b).padStart(5)} ${row.kind.padEnd(7)} ` +
+    LANES.map(k => row.lanes[k]).join(" "));
+  return head.concat(rows).join("\n");
+}
+
+function parseScore(text) {
+  const score = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.split("#")[0].trim();
+    if (!line) continue;
+    const parts = line.split(/\s+/);
+    if (parts.length !== 2 + LANES.length)
+      throw new Error(`score row needs a bar, a section and ${LANES.length} lanes: ${line}`);
+    const lanes = {};
+    parts.slice(2).forEach((lane, i) => {
+      if (lane.length !== STEPS || /[^x.]/.test(lane))
+        throw new Error(`lane must be ${STEPS} of '${HIT}' or '${REST}': ${lane}`);
+      lanes[LANES[i]] = lane;
+    });
+    score.push({ kind: parts[1], lanes });
+  }
+  if (!score.length) throw new Error("score is empty");
+  return score;
+}
+
+function scoreMap(score) {
+  const marks = { intro: "i", build: "b", break: ".", drop: "#" };
+  return score.map(r => marks[r.kind] || "?").join("");
+}
+
 /* ---------------- arrangement ---------------- */
 
 
@@ -369,7 +438,7 @@ function smoothGain(g, sr, ms = 30) {
   return out;
 }
 
-function buildArrangement(nSamples, sr, beatSamples, sections, offset, samples) {
+function buildArrangement(nSamples, sr, beatSamples, score, offset, samples) {
   const beat = beatSamples / sr;
 
   // Sample-only: the kick sample stays at its native pitch (C). No retuning —
@@ -392,7 +461,8 @@ function buildArrangement(nSamples, sr, beatSamples, sections, offset, samples) 
   const kickAlt = samples.kickAlt ? samples.kickAlt.slice(0, Math.floor(beat * 0.45 * sr)) : null;
   const bell = samples.bell;
 
-  const eighth = Math.floor(beatSamples / 2);
+  const voices = { kick, bass: stab, snare, roll: kickAlt || kick, bell };
+
   const pad = beatSamples * 12 + (bell ? bell.length : 0);
   const drums = new Float32Array(nSamples + pad);
   const songGain = new Float32Array(nSamples + pad).fill(1);
@@ -402,59 +472,64 @@ function buildArrangement(nSamples, sr, beatSamples, sections, offset, samples) 
   const filterRegions = [], dropRegions = [], dropStarts = [];
 
   const put = (buf, i, sig, amp) => {
-    if (!sig) return;
+    if (!sig || i >= buf.length) return;
     const end = Math.min(i + sig.length, buf.length);
     for (let k = i; k < end; k++) buf[k] += sig[k - i] * amp;
   };
 
-  let bar = 0;
-  for (const { name, variant, bars } of sections) {
-    const s0 = Math.min(offset + bar * 4 * beatSamples, drums.length);
-    const s1 = Math.min(offset + (bar + bars) * 4 * beatSamples, drums.length);
-    if (s1 <= s0) break;
+  // Hit level. Only the snare ramps, through a build.
+  const level = (lane, kind, pos) => {
+    if (lane === "snare" && kind === "build") return 0.25 + 0.3 * pos;
+    if (lane === "bell") return kind === "drop" ? 0.4 : 0.35;
+    return { kick: 1.0, bass: 0.9, snare: 0.5, roll: 0.85 }[lane];
+  };
+
+  // Runs of one section drive the mix; the score drives the hits.
+  const runs = [], barRun = [];
+  for (let b = 0; b < score.length;) {
+    let j = b;
+    while (j < score.length && score[j].kind === score[b].kind) j++;
+    runs.push({ kind: score[b].kind, b0: b, bars: j - b });
+    b = j;
+  }
+  for (const { kind, b0, bars } of runs) {
+    const s0 = Math.min(offset + b0 * 4 * beatSamples, drums.length);
+    const s1 = Math.min(offset + (b0 + bars) * 4 * beatSamples, drums.length);
+    for (let b = 0; b < bars; b++) barRun.push({ kind, barInRun: b, runBars: bars });
+    if (s1 <= s0) continue;
 
     // The kick + offbeat bass NEVER stop: a steady four-on-the-floor
     // "bass·kick·bass·kick" over the WHOLE song. Sections only change the extras
     // (snares, fills, bell) and how much the song ducks.
-    const isDrop = name === "drop";
-    if (isDrop) {
+    if (kind === "drop") {
       dropStarts.push(s0);
       dropRegions.push([s0, s1]);
       // kick-forward: the song pumps against the kick but stays listenable
       for (let i = s0; i < s1; i++) songGain[i] = duck(i) * 0.85;
-      put(drums, s0, bell, 0.4);   // bell marks the drop
-    } else if (name === "build") {
+    } else if (kind === "build") {
       filterRegions.push([s0, s1]);
       // sweep + tuck the song into the drop; the kick keeps driving under it
       for (let i = s0; i < s1; i++) songGain[i] = 0.85 - 0.2 * (i - s0) / (s1 - s0);
     } else {   // intro / break — song forward, lighter kit (kick still runs)
       for (let i = s0; i < s1; i++) songGain[i] = 0.9;
-      if (name === "break") put(drums, s0, bell, 0.35);
     }
+  }
 
-    const totalE = bars * 8;   // eighth-note steps (8 per bar)
-    for (let e = 0; e < totalE; e++) {
-      const i = s0 + e * eighth;
-      const onBeat = e % 2 === 0;
-      const beatInBar = (e >> 1) % 4;
-      const lastPhraseBar = ((e >> 3) % 8) === 7;   // last bar of an 8-bar phrase
-
-      if (onBeat) {
-        put(drums, i, kick, 1.0);                   // kick on every beat
-        // sparse 16th roll: drops only, last phrase bar, beats 3-4
-        if (isDrop && lastPhraseBar && beatInBar >= 2)
-          put(drums, i + (beatSamples >> 2), kickAlt || kick, 0.85);
-      } else {
-        put(drums, i, stab, 0.9);                   // offbeat bass thump
-      }
-
-      // snare backbeat on 2 & 4 — drops carry it; builds ramp it in
-      if (onBeat && (beatInBar === 1 || beatInBar === 3)) {
-        if (isDrop) put(drums, i, snare, 0.5);
-        else if (name === "build") put(drums, i, snare, 0.25 + 0.3 * (e / totalE));
+  for (let b = 0; b < score.length; b++) {
+    const base = offset + b * 4 * beatSamples;
+    if (base >= drums.length) break;
+    const { kind, barInRun, runBars } = barRun[b];
+    for (const lane of LANES) {
+      const pattern = score[b].lanes[lane];
+      for (let s = 0; s < pattern.length; s++) {
+        if (pattern[s] === REST) continue;
+        const pos = (barInRun * 8 + (s >> 1)) / (runBars * 8);
+        // a score step is a 16th; round the whole span, not the step, so the
+        // last hit of a bar cannot drift off the beat
+        put(drums, base + Math.floor(s * beatSamples / 4), voices[lane],
+            level(lane, kind, pos));
       }
     }
-    bar += bars;
   }
   return {
     drums: drums.subarray(0, nSamples),
@@ -706,7 +781,7 @@ async function removeDrums(mono) {
   return out;
 }
 
-async function generate(file, targetBPM, dropAt, log) {
+async function generate(file, targetBPM, dropAt, editedScore, log) {
   const ctx = new AudioContext();
   log(`loading ${file.name} ...`);
   const [decoded, samples] = await Promise.all([
@@ -750,28 +825,35 @@ async function generate(file, targetBPM, dropAt, log) {
   await yield_();
 
   const nBars = Math.max(Math.floor((mono.length - offset) / barLen), 1);
-  let high, drops, sections;
-  if (dropAt && dropAt.length) {
-    drops = [...new Set(dropAt.map(t => Math.max(2, Math.round((t * sr - offset) / barLen))))].sort((a, b) => a - b);
-    high = highFromDrops(nBars, drops);
-    sections = planFromStructure(high, drops);
-    log(`  manual drops at ${dropAt.map(t => t.toFixed(0) + "s").join(", ")}`);
+  let score;
+  if (editedScore) {
+    score = parseScore(editedScore);
+    log(`  score: <span class="hi">${score.length} bars</span> from the score box`);
   } else {
-    log("finding the drops ...");
-    ({ high, drops } = analyzeStructure(mono, env, sr, beatSamples, offset));
-    // a drop needs a tease: never drop before bar 16
-    if (drops.length && nBars > 24) {
-      drops = [...new Set(drops.map(d => Math.max(d, 16)))].sort((a, b) => a - b);
-      const merged = [drops[0]];
-      for (const d of drops.slice(1)) if (d - merged[merged.length - 1] >= 8) merged.push(d);
-      drops = merged;
+    let high, drops, sections;
+    if (dropAt && dropAt.length) {
+      drops = [...new Set(dropAt.map(t => Math.max(2, Math.round((t * sr - offset) / barLen))))].sort((a, b) => a - b);
       high = highFromDrops(nBars, drops);
+      sections = planFromStructure(high, drops);
+      log(`  manual drops at ${dropAt.map(t => t.toFixed(0) + "s").join(", ")}`);
+    } else {
+      log("finding the drops ...");
+      ({ high, drops } = analyzeStructure(mono, env, sr, beatSamples, offset));
+      // a drop needs a tease: never drop before bar 16
+      if (drops.length && nBars > 24) {
+        drops = [...new Set(drops.map(d => Math.max(d, 16)))].sort((a, b) => a - b);
+        const merged = [drops[0]];
+        for (const d of drops.slice(1)) if (d - merged[merged.length - 1] >= 8) merged.push(d);
+        drops = merged;
+        high = highFromDrops(nBars, drops);
+      }
+      sections = drops.length ? planFromStructure(high, drops) : planFixed(nBars);
+      if (!drops.length) log("  (no clear drop found — using default arrangement)");
     }
-    sections = drops.length ? planFromStructure(high, drops) : planFixed(nBars);
-    if (!drops.length) log("  (no clear drop found — using default arrangement)");
+    score = scoreFromSections(sections);
   }
-  const map = high.map((h, b) => (drops.includes(b) ? '<span class="drop">#</span>' : h ? "#" : ".")).join("");
-  log(`  bar map: ${map}`);
+  const map = scoreMap(score).replace(/#+/g, m => `<span class="drop">${m}</span>`);
+  log(`  bar map (i intro, b build, . break, # drop): ${map}`);
   await yield_();
 
   // Strip the song's OWN drums (HPSS harmonic stem) so ours play over a clean
@@ -780,9 +862,9 @@ async function generate(file, targetBPM, dropAt, log) {
   mono = await removeDrums(mono);
   await yield_();
 
-  log(`building arrangement — ${nBars} bars, ${drops.length || "auto"} drop(s) ...`);
+  log(`building arrangement — ${score.length} bars from the score ...`);
   const { drums, songGain, filterRegions, dropRegions, dropStarts } =
-    buildArrangement(mono.length, sr, beatSamples, sections, offset, samples);
+    buildArrangement(mono.length, sr, beatSamples, score, offset, samples);
   for (const [a, b] of filterRegions) highpassSweep(mono, a, b, sr);
   // carve the song's low end out during drops so the tekk kick owns it —
   // gentler cut (120Hz) leaves more of the song's body so it stays listenable
@@ -813,7 +895,8 @@ async function generate(file, targetBPM, dropAt, log) {
   for (const v of mix) mx = Math.max(mx, Math.abs(v));
   for (let i = 0; i < mix.length; i++) mix[i] = mix[i] / mx * 0.97;
 
-  return { blob: encodeWav(mix, sr), sr, bpm: targetBPM };
+  return { blob: encodeWav(mix, sr), sr, bpm: targetBPM,
+           score: formatScore(score, targetBPM, offset, sr) };
 }
 
 /* ---------------- UI ---------------- */
@@ -850,7 +933,9 @@ $("go").addEventListener("click", async () => {
   try {
     const dropAt = $("dropat").value.split(",").map(s => parseFloat(s)).filter(v => isFinite(v) && v >= 0);
     const target = $("auto").checked ? null : parseInt($("bpm").value, 10);
-    const { blob, bpm } = await generate(currentFile, target, dropAt, log);
+    const edited = $("score").value.trim();
+    const { blob, bpm, score } = await generate(currentFile, target, dropAt, edited, log);
+    $("score").value = score;
     const url = URL.createObjectURL(blob);
     $("player").src = url;
     const base = currentFile.name.replace(/\.[^.]+$/, "");

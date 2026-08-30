@@ -169,6 +169,23 @@ h1 {
 }
 .ctl input[type=text]:focus { outline: 2px solid var(--plum); outline-offset: 0; }
 
+.ctl textarea {
+  width: 100%;
+  height: 190px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+  color: var(--ink);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow: auto;
+  resize: vertical;
+}
+.ctl textarea:focus { outline: 2px solid var(--plum); outline-offset: 0; }
+
 #bpmval { color: var(--plum); }
 
 button#go {
@@ -274,6 +291,11 @@ a#dl:hover { background: var(--plum); color: var(--paper); }
       <div class="ctl">
         <span class="label">force drops at seconds (optional)</span>
         <input type="text" id="dropat" placeholder="auto-detect · e.g. 30,72">
+      </div>
+      <div class="ctl">
+        <span class="label">score — one row per bar, one lane per voice</span>
+        <textarea id="score" spellcheck="false" autocapitalize="off" autocomplete="off"
+          placeholder="printed here after you generate · edit a lane, then generate again to render it back"></textarea>
       </div>
       <button id="go" disabled>generate</button>
       <div id="log"></div>

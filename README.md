@@ -16,10 +16,9 @@ https://ericspencer.us/hardtekk-generator
    lands exactly on the song's beat.
 4. Analyzes per-bar energy (full mix / drums / bass band) to find the song's
    real drops, and shapes build → breath → DROP around each one.
-5. Lays down the tekk arrangement on the grid: a distorted 4/4 kick **tuned
-   to the song's root note** (with the signature `x.x.x.x.x.x.xxx.` roll),
-   offbeat saw-bass stabs, offbeat open hats, 16th closed hats, snare builds
-   and noise risers.
+5. Writes the arrangement as a **score**: one row per bar, one lane per voice
+   (kick, bass, snare, roll, bell), 16 steps per bar. The score places every
+   hit, so you can read the whole arrangement and edit any of it.
 6. Sidechain-ducks the original against every kick so it pumps, soft-clips
    the master, and hands you a WAV.
 
@@ -35,17 +34,39 @@ python3 -m venv .venv && .venv/bin/pip install librosa soundfile numpy scipy
 ./tekk song.mp3 --drop-at 30,72    # force drops at 30s & 72s (remix timeline)
 ```
 
-It prints a **bar map** so you can see what it detected:
+It prints a **bar map** so you can see what it planned:
 
 ```
-..................################################.......###########..#####
-                  ^                                      ^            ^
-# = the song's own beat/bass is playing   . = sparse/vocal   ^ = where we drop
+iiiiiiiiiiiiiibb############............
+i = intro   b = build   . = break   # = drop
 ```
 
-If a drop feels early/late, read its second off the map and pin it with
-`--drop-at` (or the "force drops" field on the website). Each forced drop
-gets a 2-bar build + a half-beat breath before it.
+If a drop feels early/late, pin it with `--drop-at` (or the "force drops"
+field on the website). Each forced drop gets a 2-bar build + a half-beat
+breath before it.
+
+## The score
+
+The arrangement is a plain-text score. Print it, edit it, render it back:
+
+```sh
+./tekk song.mp3 --print-score song.tekk   # write the score (omit the path for stdout)
+./tekk song.mp3 --score song.tekk         # render the edited score
+```
+
+```
+#  bar section kick             bass             snare            roll             bell
+   16 drop    x...x...x...x... ..x...x...x...x. ....x.......x... ................ x...............
+   23 drop    x...x...x...x... ..x...x...x...x. ....x.......x... .........x...x.. ................
+```
+
+`x` is a hit, `.` is a rest, and each lane is 16 sixteenth-note steps. The
+score places every hit, so moving a snare or adding a bell needs no new flag.
+The section name (`intro`, `build`, `break`, `drop`) sets the mix: how hard the
+song ducks, which bars get the highpass sweep, and the snare's build ramp.
+
+The website has the same score in a text box under the controls: generate once
+to fill it, edit a lane, then generate again.
 
 ## Drop-folder mode
 

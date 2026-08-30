@@ -14,8 +14,14 @@ Recipe (the classic hardtekk formula):
 
 Every pitched voice comes from a sample; there are no synth oscillators.
 
+The arrangement is a score: one row per bar, one lane per voice, 16 steps per
+bar. --print-score writes it out and --score renders an edited one back, so any
+hit can be moved without a new command-line switch.
+
 Usage:
   python hardtekk.py <song.(mp3|wav|m4a|flac|ogg)> [--bpm 180] [-o out.wav]
+  python hardtekk.py song.mp3 --print-score song.tekk
+  python hardtekk.py song.mp3 --score song.tekk
 """
 
 import argparse
@@ -357,16 +363,83 @@ def plan_from_structure(high, drops):
     return sections
 
 
-def structure_map(high, drops):
-    """ASCII overview: # full, . sparse, ^ under detected drop bars."""
-    row = "".join("#" if h else "." for h in high)
-    mark = "".join("^" if b in drops else " " for b in range(len(high)))
-    return row + "\n  " + mark
+# --- the score ------------------------------------------------------------
+# The arrangement is a score: one row per bar, one lane per voice, 16 steps
+# (sixteenth notes) per bar. Nothing else decides where a hit lands, so
+# --print-score shows the whole plan and --score renders an edited one back.
+
+STEPS = 16
+LANES = ("kick", "bass", "snare", "roll", "bell")
+HIT, REST = "x", "."
 
 
-def build_arrangement(n_samples, bpm, sections, offset=0, sr=SR):
-    """Return (drums, song_gain, song_filter_regions, drop_starts). Bars are placed
-    starting at `offset` so the whole arrangement is phase-locked to the song.
+def score_from_sections(sections):
+    """Expand render sections into the per-bar score the renderer reads."""
+    score = []
+    for kind, bars in sections:
+        name = kind if isinstance(kind, str) else kind[0]
+        for b in range(bars):
+            lanes = {k: [REST] * STEPS for k in LANES}
+            for s in range(0, STEPS, 4):
+                lanes["kick"][s] = HIT                        # four on the floor
+            for s in range(2, STEPS, 4):
+                lanes["bass"][s] = HIT                        # offbeat bass thump
+            if name in ("drop", "build"):
+                lanes["snare"][4] = lanes["snare"][12] = HIT  # backbeat on 2 & 4
+            if name == "drop" and b % 8 == 7:
+                lanes["roll"][9] = lanes["roll"][13] = HIT    # sparse 16th roll
+            if b == 0 and name in ("drop", "break"):
+                lanes["bell"][0] = HIT                        # bell marks the section
+            score.append({"kind": name,
+                          "lanes": {k: "".join(v) for k, v in lanes.items()}})
+    return score
+
+
+def format_score(score, bpm, offset, sr=SR):
+    """Print the score: bar number, section, then one lane per voice."""
+    head = [f"# hardtekk score: {len(score)} bars at {bpm:.1f} bpm, downbeat "
+            f"{offset / sr * 1000:.0f} ms, {STEPS} steps per bar",
+            "# edit a lane, then render it back with --score FILE",
+            "#  bar section " + " ".join(f"{k:<{STEPS}}" for k in LANES)]
+    rows = [f"{b:>5} {row['kind']:<7} " + " ".join(row["lanes"][k] for k in LANES)
+            for b, row in enumerate(score)]
+    return "\n".join(head + rows)
+
+
+def parse_score(text):
+    """Read a score back. Blank lines and # comments are ignored."""
+    score = []
+    for line in text.splitlines():
+        line = line.split("#")[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) != 2 + len(LANES):
+            raise ValueError(f"score row needs a bar, a section and "
+                             f"{len(LANES)} lanes: {line!r}")
+        for lane in parts[2:]:
+            if len(lane) != STEPS or set(lane) - {HIT, REST}:
+                raise ValueError(f"lane must be {STEPS} of '{HIT}' or '{REST}': "
+                                 f"{lane!r}")
+        score.append({"kind": parts[1], "lanes": dict(zip(LANES, parts[2:]))})
+    if not score:
+        raise ValueError("score is empty")
+    return score
+
+
+def structure_map(score):
+    """ASCII overview of the score: one character per bar."""
+    marks = {"intro": "i", "build": "b", "break": ".", "drop": "#"}
+    return "".join(marks.get(row["kind"], "?") for row in score)
+
+
+def build_arrangement(n_samples, bpm, score, offset=0, sr=SR):
+    """Return (drums, song_gain, song_filter_regions, drop_regions, drop_starts).
+
+    The score places every hit: bar b, lane L, step s puts lane L's sample at
+    bar b's step s. Bars start at `offset`, so the whole arrangement is
+    phase-locked to the song. A bar's section only sets the mix — how much the
+    song ducks, which bars get swept, and the snare's ramp through a build.
 
     Sample-only: every voice below is a real sample (or derived from one). There
     are no synth oscillators, so nothing is tuned to the song's key."""
@@ -388,7 +461,8 @@ def build_arrangement(n_samples, bpm, sections, offset=0, sr=SR):
     kick_alt = smp["kick_alt"][: int(beat * 0.45 * sr)] if smp["kick_alt"] is not None else None
     bell = smp["bell"]
 
-    eighth = bs // 2
+    voices = {"kick": kick, "bass": stab, "snare": snare,
+              "roll": kick_alt if kick_alt is not None else kick, "bell": bell}
 
     pad = bs * 4 * 3 + (len(bell) if bell is not None else 0)
     drums = np.zeros(n_samples + pad)
@@ -404,64 +478,64 @@ def build_arrangement(n_samples, bpm, sections, offset=0, sr=SR):
     drop_starts = []
 
     def put(buf, i, sig, amp):
-        if sig is None:
+        if sig is None or i >= len(buf):
             return
-        buf[i : i + len(sig)] += sig * amp
+        n = min(len(sig), len(buf) - i)
+        buf[i : i + n] += sig[:n] * amp
 
-    bar = 0
-    for kind, bars in sections:
-        s0 = min(offset + bar * 4 * bs, len(drums))
-        s1 = min(offset + (bar + bars) * 4 * bs, len(drums))
+    def level(lane, kind, pos):
+        """Hit level. Only the snare ramps, through a build."""
+        if lane == "snare" and kind == "build":
+            return 0.25 + 0.3 * pos
+        return {"kick": 1.0, "bass": 0.9, "snare": 0.5, "roll": 0.85,
+                "bell": 0.4 if kind == "drop" else 0.35}[lane]
+
+    # Runs of one section drive the mix; the score drives the hits.
+    runs = []
+    b = 0
+    while b < len(score):
+        j = b
+        while j < len(score) and score[j]["kind"] == score[b]["kind"]:
+            j += 1
+        runs.append((score[b]["kind"], b, j - b))
+        b = j
+
+    bar_run = []                                # per bar: (kind, bar in run, run length)
+    for kind, b0, bars in runs:
+        s0 = min(offset + b0 * 4 * bs, len(drums))
+        s1 = min(offset + (b0 + bars) * 4 * bs, len(drums))
+        bar_run += [(kind, b, bars) for b in range(bars)]
         if s1 <= s0:
-            break
-        name = kind if isinstance(kind, str) else kind[0]
-        variant = kind[1] if isinstance(kind, tuple) else 0
+            continue
 
         # The kick + offbeat bass NEVER stop: a steady four-on-the-floor
         # "bass·kick·bass·kick" over the WHOLE song. Sections only change the
         # extras (snares, fills, bell) and how much the song ducks.
-        is_drop = (name == "drop")
-        if is_drop:
+        if kind == "drop":
             drop_starts.append(s0)
             drop_regions.append((s0, s1))
             # kick-forward: the song pumps against the kick but stays listenable
             song_gain[s0:s1] = duck[s0:s1] * 0.85
-            put(drums, s0, bell, 0.4)  # bell marks the drop
-        elif name == "build":
+        elif kind == "build":
             filter_regions.append((s0, s1))
             # sweep + tuck the song into the drop; the kick keeps driving under it
             song_gain[s0:s1] = np.linspace(0.85, 0.65, s1 - s0)
         else:  # intro / break — song forward, lighter kit (kick still runs)
             song_gain[s0:s1] = 0.9
-            if name == "break":
-                put(drums, s0, bell, 0.35)
 
-        rng = np.random.default_rng(1000 + bar)
-        total_e = bars * 8  # eighth-note steps (8 per bar)
-        for e in range(total_e):
-            i = s0 + e * eighth
-            on_beat = (e % 2 == 0)
-            beat_in_bar = (e // 2) % 4
-            # last bar of every 8-bar phrase → a sparse fill, not the norm
-            last_phrase_bar = ((e // 8) % 8 == 7)
-
-            if on_beat:
-                put(drums, i, kick, 1.0)                     # kick on every beat
-                # sparse 16th roll: drops only, last phrase bar, beats 3-4
-                if is_drop and last_phrase_bar and beat_in_bar >= 2:
-                    krl = kick_alt if kick_alt is not None else kick
-                    put(drums, i + bs // 4, krl, 0.85)       # one extra 16th
-            else:
-                put(drums, i, stab, 0.9)                     # offbeat bass thump
-
-            # snare backbeat on 2 & 4 — drops carry it; builds ramp it in
-            if on_beat and beat_in_bar in (1, 3):
-                if is_drop:
-                    put(drums, i, snare, 0.5)
-                elif name == "build":
-                    put(drums, i, snare, 0.25 + 0.3 * (e / max(total_e, 1)))
-
-        bar += bars
+    for b, row in enumerate(score):
+        base = offset + b * 4 * bs
+        if base >= len(drums):
+            break
+        kind, bar_in_run, run_bars = bar_run[b]
+        for lane in LANES:
+            for s, c in enumerate(row["lanes"][lane]):
+                if c == REST:
+                    continue
+                pos = (bar_in_run * 8 + s // 2) / (run_bars * 8)
+                # a score step is a 16th; round the whole span, not the step, so
+                # the last hit of a bar cannot drift off the beat
+                put(drums, base + s * bs // 4, voices[lane], level(lane, kind, pos))
 
     song_gain = smooth_gain(song_gain[:n_samples])
     return drums[:n_samples], song_gain, filter_regions, drop_regions, drop_starts
@@ -493,7 +567,8 @@ def auto_tempo(bpm):
     return min(cands, key=lambda t: abs(t - 165)) if cands else 165.0
 
 
-def hardtekk(in_path, out_path, target_bpm=None, drop_at=None):
+def hardtekk(in_path, out_path, target_bpm=None, drop_at=None, score_path=None,
+             print_score=None):
     print(f"Loading {os.path.basename(in_path)} ...")
     y, _ = librosa.load(in_path, sr=SR, mono=True)
     y = y / max(np.max(np.abs(y)), 1e-9)
@@ -517,37 +592,52 @@ def hardtekk(in_path, out_path, target_bpm=None, drop_at=None):
     print(f"    measured grid: {grid_bpm:.1f} BPM, downbeat offset {offset/SR*1000:.0f} ms")
 
     n_bars = max((len(y) - offset) // barlen, 1)
-    if drop_at:
-        # manual override: place drops at the given remix-timeline seconds
-        drops = sorted({max(2, round((t * SR - offset) / barlen)) for t in drop_at})
-        high = high_from_drops(n_bars, drops)
-        sections = plan_from_structure(high, drops)
-        print(f"  Manual drops at {', '.join(f'{t:.0f}s' for t in drop_at)}")
+    if score_path:
+        with open(score_path) as f:
+            score = parse_score(f.read())
+        print(f"  Score: {len(score)} bars read from {os.path.basename(score_path)}")
     else:
-        print("  Watching stems (drums/bass) to find the real drops...")
-        high, drops, _ = analyze_structure(y, grid_bpm, offset)
-        # a drop needs a tease: never drop before bar 16 (the reference
-        # release waits 32 bars of vocal before the first drop)
-        if drops and n_bars > 24:
-            drops = sorted({max(d, 16) for d in drops})
-            merged = [drops[0]]
-            for d in drops[1:]:
-                if d - merged[-1] >= 8:
-                    merged.append(d)
-            drops = merged
+        if drop_at:
+            # manual override: place drops at the given remix-timeline seconds
+            drops = sorted({max(2, round((t * SR - offset) / barlen)) for t in drop_at})
             high = high_from_drops(n_bars, drops)
-        if drops:
             sections = plan_from_structure(high, drops)
+            print(f"  Manual drops at {', '.join(f'{t:.0f}s' for t in drop_at)}")
         else:
-            # flat song, no clear contrast: fall back to fixed arrangement
-            print("  (no clear drop found — using default arrangement)")
-            sections = plan_sections(len(high))
-    print("  bar map (# = song's beat in, ^ = drop):")
-    print("  " + structure_map(high, drops).replace("\n", "\n  "))
+            print("  Watching stems (drums/bass) to find the real drops...")
+            high, drops, _ = analyze_structure(y, grid_bpm, offset)
+            # a drop needs a tease: never drop before bar 16 (the reference
+            # release waits 32 bars of vocal before the first drop)
+            if drops and n_bars > 24:
+                drops = sorted({max(d, 16) for d in drops})
+                merged = [drops[0]]
+                for d in drops[1:]:
+                    if d - merged[-1] >= 8:
+                        merged.append(d)
+                drops = merged
+                high = high_from_drops(n_bars, drops)
+            if drops:
+                sections = plan_from_structure(high, drops)
+            else:
+                # flat song, no clear contrast: fall back to fixed arrangement
+                print("  (no clear drop found — using default arrangement)")
+                sections = plan_sections(len(high))
+        score = score_from_sections(sections)
+    print("  bar map (i intro, b build, . break, # drop):")
+    print("  " + structure_map(score))
+
+    if print_score:
+        text = format_score(score, grid_bpm, offset)
+        if print_score == "-":
+            print(text)
+        else:
+            with open(print_score, "w") as f:
+                f.write(text + "\n")
+            print(f"  Score written to {print_score} — edit it, then --score it back")
 
     drums, song_gain, filter_regions, drop_regions, drop_starts = build_arrangement(
-        len(y), grid_bpm, sections, offset)
-    print(f"  {len(high)} bars, {len(drop_starts)} hardtekk drop(s) at "
+        len(y), grid_bpm, score, offset)
+    print(f"  {len(score)} bars, {len(drop_starts)} hardtekk drop(s) at "
           + ", ".join(f"{s/SR:.0f}s" for s in drop_starts))
 
     # Strip the song's OWN drums (HPSS harmonic stem) so our tekk kit plays over
@@ -595,6 +685,10 @@ def main():
     p.add_argument("--drop-at", default=None,
                    help="comma-separated remix-timeline seconds to force drops, "
                         "e.g. --drop-at 30,72 (overrides auto-detection)")
+    p.add_argument("--print-score", nargs="?", const="-", default=None, metavar="FILE",
+                   help="write the bar-by-bar score (default: stdout)")
+    p.add_argument("--score", default=None, metavar="FILE",
+                   help="render this score file instead of planning one")
     p.add_argument("-o", "--out", default=None, help="output wav path")
     args = p.parse_args()
 
@@ -611,7 +705,8 @@ def main():
         os.makedirs(outdir, exist_ok=True)
         tag = f"{int(args.bpm)}bpm" if args.bpm else "auto"
         out = os.path.join(outdir, f"{base}_hardtekk_{tag}.wav")
-    hardtekk(args.song, out, args.bpm, drop_at=drop_at)
+    hardtekk(args.song, out, args.bpm, drop_at=drop_at, score_path=args.score,
+             print_score=args.print_score)
 
 
 if __name__ == "__main__":
