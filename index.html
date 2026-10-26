@@ -3,314 +3,210 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Hardtekk Generator</title>
-<meta name="description" content="Drop a song in, get a hardtekk remix out. 100% client-side.">
-<meta property="og:title" content="Hardtekk Generator">
-<meta property="og:description" content="Drop a song in, get a hardtekk remix out. 100% client-side.">
-<meta property="og:type" content="website">
-<link rel="canonical" href="https://ericspencer.us/hardtekk-generator/">
+<title>Hardtekk Remix</title>
+<meta name="description" content="Song in, hardtekk remix out: in-key sustained kicks, re-arranged sections, live mixer. Runs in the browser.">
+<link rel="stylesheet" href="assets/7.css">
 <style>
 :root {
-  --paper: oklch(93% 0.012 84);
-  --paper-raised: oklch(96% 0.009 84);
-  --ink: oklch(17% 0.012 64);
-  --ink-soft: oklch(39% 0.012 67);
-  --ink-faint: oklch(56% 0.01 70);
-  --line: oklch(63% 0.012 73 / 0.44);
-  --plum: oklch(28% 0.082 320);
-  --shadow: oklch(22% 0.012 64 / 0.14);
-  --font-tight: "Helvetica Neue Condensed Bold", "Arial Narrow", "Liberation Sans Narrow", Arial, sans-serif;
-  --font-ui: "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+  --fl-panel: #2a2725; --fl-panel-2: #201d1c; --fl-edge: #0a0908; --fl-hi: rgba(255,255,255,0.09);
+  --fl-text: #cfc6c0; --fl-dim: #8e837c; --red: #e01b0c; --red-hot: #ff4a22; --led: #ff5a1f; --ok: #4ade5a;
+  --font-panel: Tahoma, Verdana, "DejaVu Sans", Geneva, sans-serif;
+  --font-led: "Lucida Console", "DejaVu Sans Mono", Consolas, monospace;
 }
-
 * { box-sizing: border-box; }
-
-html { min-height: 100%; }
-
 body {
-  margin: 0;
-  min-height: 100svh;
-  background:
-    linear-gradient(oklch(17% 0.012 64 / 0.035) 1px, transparent 1px),
-    radial-gradient(88% 68% at 18% -12%, oklch(72% 0.045 318 / 0.28) 0%, transparent 48%),
-    radial-gradient(92% 74% at 110% 4%, oklch(98% 0.006 84 / 0.88) 0%, transparent 52%),
-    var(--paper);
-  background-size: 100% 13px, auto, auto, auto;
-  color: var(--ink);
-  font-family: var(--font-ui);
-  overflow-x: hidden;
-  -webkit-font-smoothing: antialiased;
+  margin: 0; min-height: 100svh; padding: 24px 16px 48px; font-family: var(--font-panel); color: var(--fl-text);
+  background: #0b0302 url("assets/fire-breather-viatour.jpg") 62% 42% / cover fixed no-repeat;
 }
-
-a { color: inherit; text-decoration: none; }
-a:focus-visible { outline: 2px solid var(--plum); outline-offset: 4px; }
-
-.shell {
-  width: min(100%, 1240px);
-  min-height: 100svh;
-  margin: 0 auto;
-  padding: 18px;
-}
-
-.nav {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: start;
-  gap: 14px;
-  padding-bottom: 16px;
-}
-
-.nav span, .nav a, .label, .meta, .foot {
-  color: var(--ink-soft);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.2em;
-  line-height: 1.25;
-  text-transform: uppercase;
-}
-
-.nav .links {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 10px 14px;
-}
-
-.nav a { border-bottom: 1px solid transparent; }
-.nav a:hover { border-color: currentColor; }
-
-.title {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 16px;
-  border-top: 1px solid var(--line);
-  padding-top: clamp(24px, 5vw, 56px);
-  margin-bottom: 18px;
-}
-
-h1 {
-  margin: 0;
-  color: var(--plum);
-  font-family: var(--font-tight);
-  font-size: clamp(56px, 14vw, 200px);
-  font-stretch: condensed;
-  font-weight: 900;
-  letter-spacing: 0;
-  line-height: 0.78;
-  overflow-wrap: anywhere;
-  text-transform: uppercase;
-}
-
-.meta {
-  justify-self: end;
-  padding-bottom: clamp(5px, 1.2vw, 18px);
-  text-align: right;
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  gap: 16px;
-  align-items: start;
-}
-
-.card {
-  border: 1px solid var(--line);
-  background: oklch(95% 0.009 84 / 0.72);
-  box-shadow: 0 18px 50px oklch(22% 0.012 64 / 0.08);
-  padding: 14px;
-  min-width: 0;
-}
-
-#drop {
-  display: grid;
-  place-items: center;
-  gap: 10px;
-  min-height: 240px;
-  cursor: pointer;
-  text-align: center;
-  transition: border-color 160ms cubic-bezier(0.22,1,0.36,1),
-              background 160ms cubic-bezier(0.22,1,0.36,1),
-              transform 160ms cubic-bezier(0.22,1,0.36,1);
-}
-
-#drop:hover, #drop.over {
-  border-color: oklch(41% 0.036 310 / 0.66);
-  background: var(--paper-raised);
-  transform: translateY(-2px);
-}
-
-#drop strong {
-  display: block;
-  color: var(--ink);
-  font-family: var(--font-tight);
-  font-size: clamp(30px, 4.4vw, 52px);
-  font-stretch: condensed;
-  font-weight: 900;
-  line-height: 0.82;
-  text-transform: uppercase;
-  overflow-wrap: anywhere;
-}
-
-.controls { display: grid; gap: 18px; }
-
-.ctl input[type=range] { width: 100%; accent-color: var(--plum); margin-top: 8px; }
-
-.ctl input[type=text] {
-  width: 100%;
-  margin-top: 8px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  background: var(--paper-raised);
-  color: var(--ink);
-  font-family: var(--font-ui);
-  font-size: 14px;
-}
-.ctl input[type=text]:focus { outline: 2px solid var(--plum); outline-offset: 0; }
-
-.ctl textarea {
-  width: 100%;
-  height: 190px;
-  margin-top: 8px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  background: var(--paper-raised);
-  color: var(--ink);
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 11px;
-  line-height: 1.5;
-  white-space: pre;
-  overflow: auto;
-  resize: vertical;
-}
-.ctl textarea:focus { outline: 2px solid var(--plum); outline-offset: 0; }
-
-#bpmval { color: var(--plum); }
-
-button#go {
-  width: 100%;
-  padding: 16px;
-  border: 1px solid var(--plum);
-  background: var(--plum);
-  color: var(--paper);
-  font-family: var(--font-tight);
-  font-size: clamp(24px, 3vw, 34px);
-  font-stretch: condensed;
-  font-weight: 900;
-  letter-spacing: 0.02em;
-  line-height: 0.9;
-  text-transform: uppercase;
-  cursor: pointer;
-  transition: transform 160ms cubic-bezier(0.22,1,0.36,1), opacity 160ms;
-}
-button#go:hover:not(:disabled) { transform: translateY(-2px); }
-button#go:disabled { opacity: 0.35; cursor: not-allowed; }
-
-#log {
-  display: none;
-  margin-top: 16px;
-  border-top: 1px solid var(--line);
-  padding-top: 14px;
-  color: var(--ink-soft);
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  overflow-x: auto;
-}
-#log .hi { color: var(--plum); font-weight: 700; }
-#log .drop { color: oklch(45% 0.16 20); font-weight: 700; }
-
-#result { display: none; gap: 12px; margin-top: 16px; flex-direction: column; }
-audio { width: 100%; }
-
-a#dl {
-  display: block;
-  text-align: center;
-  padding: 12px;
-  border: 1px solid var(--plum);
-  color: var(--plum);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
-}
-a#dl:hover { background: var(--plum); color: var(--paper); }
-
-.foot {
-  display: flex;
-  justify-content: space-between;
-  gap: 18px;
-  border-top: 1px solid var(--line);
-  margin-top: 18px;
-  padding-top: 15px;
-}
-.foot a { border-bottom: 1px solid transparent; }
-.foot a:hover { border-color: currentColor; }
-
-@media (max-width: 760px) {
-  .nav, .title, .foot { grid-template-columns: 1fr; }
-  .grid { grid-template-columns: 1fr; }
-  .nav .links { justify-content: flex-start; }
-  .meta { justify-self: start; text-align: left; }
-  .foot { flex-direction: column; }
-}
+body::before { content: ""; position: fixed; inset: 0; z-index: -1; background: linear-gradient(180deg, rgba(8,2,1,0.55), rgba(8,2,1,0.8)); }
+.desktop { width: min(100%, 1092px); margin: 0 auto; }
+.window { --w7-surface: #211e1c; --w7-w-bg: rgba(46,11,5,0.62); --w7-w-bd: rgba(140,40,20,0.78);
+  --w7-w-glass: linear-gradient(180deg, rgba(150,26,10,0.86), rgba(54,7,3,0.92)); box-shadow: 0 26px 70px rgba(0,0,0,0.72); }
+.window > .title-bar { background: linear-gradient(180deg, rgba(255,255,255,0.2), rgba(255,255,255,0.04) 48%, rgba(0,0,0,0.16) 48%, rgba(0,0,0,0.3)), linear-gradient(180deg, #7c1508, #360703); }
+.window > .title-bar .title-bar-text { color: #ffe9e3; font-weight: 700; text-shadow: 0 0 6px rgba(0,0,0,0.9); }
+.title-bar a { color: #ffd2c4; font-size: 11px; margin-right: 8px; }
+.window .window-body { margin: 0; padding: 12px; background: linear-gradient(180deg, var(--fl-panel), var(--fl-panel-2)); color: var(--fl-text); }
+.grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 10px; }
+.rack { grid-column: span 12; background: #1b1918; border: 1px solid var(--fl-edge); box-shadow: inset 0 1px 0 var(--fl-hi); border-radius: 3px; min-width: 0; }
+.rack > h2 { margin: 0; padding: 5px 9px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--fl-dim);
+  border-bottom: 1px solid #000; background: linear-gradient(180deg, #2e2a28, #242120); }
+.rack-body { padding: 10px; display: grid; gap: 10px; }
+.s6 { grid-column: span 6; } .s4 { grid-column: span 4; } .s8 { grid-column: span 8; }
+@media (max-width: 760px) { .s6, .s4, .s8 { grid-column: span 12; } }
+.label { font-size: 11px; color: var(--fl-dim); }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.ctl { display: grid; gap: 4px; min-width: 0; }
+#drop { border: 1px dashed #5a4f49; border-radius: 3px; padding: 22px 12px; text-align: center; cursor: pointer; background: #141211; }
+#drop.over { border-color: var(--led); background: #221310; }
+#drop strong { display: block; font-size: 15px; color: #f1e9e4; }
+#drop.loaded { padding: 6px 10px; text-align: left; display: flex; gap: 10px; align-items: baseline; border-style: solid; border-color: #2e2926; }
+#drop.loaded strong { font-size: 12px; display: inline; }
+#drop.loaded .label::before { content: "drop or click to replace"; }
+#drop.loaded .label { font-size: 0; } #drop.loaded .label::before { font-size: 10px; }
+body.dragging #drop { border-color: var(--led); background: #221310; }
+#files { font-size: 11px; color: var(--fl-dim); }
+button.go { padding: 8px 18px; font-weight: 700; color: #fff; border: 1px solid #2c0602; border-radius: 3px; cursor: pointer;
+  background: linear-gradient(180deg, var(--red-hot), var(--red)); box-shadow: 0 2px 0 #2c0602; }
+button.go:disabled { filter: grayscale(0.75) brightness(0.55); cursor: not-allowed; }
+.bar { height: 8px; background: #0e0c0b; border: 1px solid #000; border-radius: 2px; overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--red), var(--led)); transition: width .15s; }
+#log { font: 11px/1.45 var(--font-led); color: #b9b0ab; max-height: 140px; overflow: auto; white-space: pre-wrap; }
+#log .err { color: var(--red-hot); }
+.led { font: 13px var(--font-led); color: var(--led); text-shadow: 0 0 6px rgba(255,90,31,0.5); }
+.strips { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+@media (max-width: 760px) { .strips { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.strip { background: #141211; border: 1px solid #000; border-radius: 3px; padding: 8px; display: grid; gap: 6px; }
+.strip h3 { margin: 0; font-size: 11px; color: #f1e9e4; display: flex; justify-content: space-between; align-items: center; }
+.strip label { font-size: 10px; color: var(--fl-dim); display: grid; grid-template-columns: 34px 1fr 34px; align-items: center; gap: 4px; }
+.strip output { font: 10px var(--font-led); color: var(--led); text-align: right; }
+input[type=range] { width: 100%; }
+#seek { width: 100%; }
+#sections { display: flex; gap: 2px; height: 18px; }
+#e-wrap { overflow-x: auto; overflow-y: hidden; border: 1px solid #000; background: #0e0c0b; }
+#e-grid { display: block; cursor: crosshair; }
+#sections > span { font-size: 9px; color: #120404; display: flex; align-items: center; justify-content: center; overflow: hidden; white-space: nowrap; border-radius: 2px; }
+.k-drop { background: #ff5a1f; } .k-build { background: #c8781e; } .k-verse { background: #8e837c; } .k-break { background: #5a4f49; color: #ddd !important; }
+.k-intro { background: #6b2a1c; color: #ddd !important; } .k-outro { background: #6b2a1c; color: #ddd !important; }
+textarea { width: 100%; min-height: 54px; font: 11px var(--font-led); background: #0e0c0b; color: var(--fl-text); border: 1px solid #000; }
+select, input[type=number] { font-family: var(--font-panel); }
+a.dl { color: var(--led); font-weight: 700; }
+[hidden] { display: none !important; }
+.credit { width: min(100%, 1092px); margin: 10px auto 0; font-size: 10px; color: #8e837c; }
+.credit a { color: #b9b0ab; }
 </style>
 </head>
 <body>
-<div class="shell">
-  <nav class="nav" aria-label="Links">
-    <span>hardtekk generator</span>
-    <div class="links">
-      <a href="https://ericspencer.us">ericspencer.us</a>
-      <a href="https://github.com/EricSpencer00/hardtekk-generator">source</a>
+<div class="desktop">
+  <div class="window glass active" role="application" aria-label="Hardtekk Remix">
+    <div class="title-bar">
+      <div class="title-bar-text">Hardtekk Remix &mdash; [REMIX.dll]</div>
+      <div><a href="classic.html">classic</a></div>
     </div>
-  </nav>
+    <div class="window-body">
+      <div class="grid">
 
-  <header class="title">
-    <h1>HARDTEKK</h1>
-    <div class="meta">180 bpm<br>in-browser · nothing uploaded</div>
-  </header>
+        <section class="rack s6">
+          <h2>Source</h2>
+          <div class="rack-body">
+            <div id="drop"><strong id="droptitle">drop a song, or its 4 stems</strong><span class="label">vocals / drums / bass / other</span></div>
+            <input type="file" id="file" accept="audio/*" multiple hidden>
+            <div id="files"></div>
+          </div>
+        </section>
 
-  <main class="grid">
-    <div class="card" id="drop">
-      <div>
-        <span class="label">mp3 / wav / m4a / flac / ogg</span>
-        <strong class="big">drop a song here<br>or click to pick</strong>
+        <section class="rack s6">
+          <h2>Build</h2>
+          <div class="rack-body">
+            <div class="row">
+              <label class="ctl"><span class="label">speed</span>
+                <select id="semis">
+                  <option value="0">original</option><option value="2">+2 st</option><option value="3">+3 st</option>
+                  <option value="4" selected>+4 st</option><option value="5">+5 st</option><option value="7">+7 st</option>
+                </select></label>
+              <label class="ctl"><span class="label">drop groove</span>
+                <select id="pattern">
+                  <option value="alt" selected>x x x x &middot; x x xxx</option>
+                  <option value="tekk">x x xxx every bar</option>
+                  <option value="smooth">four on the floor</option>
+                </select></label>
+              <label class="ctl"><span class="label">16th hats</span><input type="checkbox" id="h16" checked></label>
+              <button id="shuffle" disabled>shuffle</button>
+              <button class="go" id="go" disabled>build</button>
+            </div>
+            <div class="bar"><i id="prog"></i></div>
+            <div id="log"></div>
+          </div>
+        </section>
+
+        <section class="rack" id="player" hidden>
+          <h2>Mix</h2>
+          <div class="rack-body">
+            <div class="row">
+              <button id="play">play</button><button id="stop">stop</button>
+              <span class="led" id="time">0:00</span><span class="led" id="info"></span>
+              <label class="row label"><input type="checkbox" id="pmaster" checked> master</label>
+            </div>
+            <div id="sections"></div>
+            <input type="range" id="seek" min="0" max="1000" value="0">
+            <div class="strips" id="strips"></div>
+          </div>
+        </section>
+
+        <section class="rack" id="editor" hidden>
+          <h2>Editor</h2>
+          <div class="rack-body">
+            <div class="row">
+              <button id="e-apply" disabled>apply</button>
+              <button id="e-midi">export MIDI</button>
+              <label class="row label">import MIDI <input type="file" id="e-midi-in" accept=".mid,.midi,audio/midi"></label>
+              <span class="label">click: add / remove &middot; scroll a kick: note &middot; shift + scroll: whole bar</span>
+            </div>
+            <div id="e-wrap"><canvas id="e-grid" height="104"></canvas></div>
+          </div>
+        </section>
+
+        <section class="rack s6" id="kickpanel" hidden>
+          <h2>Kick</h2>
+          <div class="rack-body">
+            <label class="ctl"><span class="label">sample</span>
+              <select id="k-sample">
+                <option value="kick-hardtekk_C.wav">classic</option>
+                <option value="cc0/ka1-acer-kick.wav">KA1 acer</option>
+                <option value="cc0/harddancewarrior-hardstyle-kick-250.wav">hardstyle 250</option>
+                <option value="cc0/ka1-kick-2-hardtekk.wav">KA1 hardtekk 2</option>
+                <option value="cc0/catfox-hard-tekk-kick-1.wav">cat-fox hard tekk</option>
+                <option value="cc0/cyclez-hardtek-kick.wav">cyclez hardtek</option>
+                <option value="cc0/arctis-hardstyle-kick-20.wav">arctis hardstyle 20</option>
+              </select></label>
+            <div class="strip">
+              <label>tune <input type="range" id="k-tune" min="-3" max="3" step="0.1" value="0"><output id="k-tune-v">0.0</output></label>
+              <label>tail <input type="range" id="k-tail" min="100" max="3000" step="50" value="900"><output id="k-tail-v">900</output></label>
+              <label>buzz <input type="range" id="k-buzz" min="0" max="0.5" step="0.01" value="0.05"><output id="k-buzz-v">0.05</output></label>
+              <label>drive <input type="range" id="k-drive" min="1" max="5" step="0.1" value="2"><output id="k-drive-v">2</output></label>
+            </div>
+            <div class="row"><button id="k-apply">apply</button><span class="label" id="k-notes"></span></div>
+          </div>
+        </section>
+
+        <section class="rack s6" id="fxpanel" hidden>
+          <h2>Effects</h2>
+          <div class="rack-body">
+            <div class="row">
+              <label class="row label"><input type="checkbox" id="fx-risers" checked> risers</label>
+              <label class="row label"><input type="checkbox" id="fx-impacts" checked> impacts</label>
+              <label class="row label"><input type="checkbox" id="fx-echo" checked> echo throws</label>
+              <label class="row label"><input type="checkbox" id="fx-tape" checked> tape stop</label>
+            </div>
+            <div class="strip">
+              <label>fade in <input type="range" id="fx-fin" min="0" max="8" step="1" value="2"><output id="fx-fin-v">2</output></label>
+              <label>fade out <input type="range" id="fx-fout" min="0" max="16" step="1" value="8"><output id="fx-fout-v">8</output></label>
+            </div>
+          </div>
+        </section>
+
+        <section class="rack s6" id="outpanel" hidden>
+          <h2>Render</h2>
+          <div class="rack-body">
+            <div class="strip">
+              <label>LUFS <input type="range" id="lufs" min="-12" max="-4" step="0.5" value="-5.5"><output id="lufs-v">-5.5</output></label>
+            </div>
+            <div class="row"><button class="go" id="render">render wav</button><a class="dl" id="dl" hidden>download</a></div>
+            <audio id="final" controls hidden></audio>
+            <details>
+              <summary class="label">arrangement</summary>
+              <textarea id="arr" spellcheck="false"></textarea>
+              <button id="rebuild">rebuild</button>
+            </details>
+          </div>
+        </section>
+
       </div>
-      <input type="file" id="file" accept="audio/*" hidden>
     </div>
-
-    <div class="card controls">
-      <div class="ctl">
-        <span class="label"><label><input type="checkbox" id="auto" checked> auto tempo (clean speed-up, like the pros)</label></span>
-        <span class="label">manual — <span id="bpmval">180</span> bpm</span>
-        <input type="range" id="bpm" min="150" max="200" value="180" step="1">
-      </div>
-      <div class="ctl">
-        <span class="label">force drops at seconds (optional)</span>
-        <input type="text" id="dropat" placeholder="auto-detect · e.g. 30,72">
-      </div>
-      <div class="ctl">
-        <span class="label">score — one row per bar, one lane per voice</span>
-        <textarea id="score" spellcheck="false" autocapitalize="off" autocomplete="off"
-          placeholder="printed here after you generate · edit a lane, then generate again to render it back"></textarea>
-      </div>
-      <button id="go" disabled>generate</button>
-      <div id="log"></div>
-      <div id="result">
-        <audio id="player" controls></audio>
-        <a id="dl" download>download wav</a>
-      </div>
-    </div>
-  </main>
-
-  <footer class="foot">
-    <span>real tekk samples · phase-locked grid · sidechained</span>
-    <a href="https://github.com/EricSpencer00/hardtekk-generator">github.com/EricSpencer00/hardtekk-generator</a>
-  </footer>
+  </div>
 </div>
-<script src="app.js"></script>
+<p class="credit">wallpaper: <a href="https://commons.wikimedia.org/wiki/File:Fire_breathing_2_Luc_Viatour.jpg" rel="noopener" target="_blank">Fire breathing 2</a> by Luc Viatour, <a href="https://creativecommons.org/licenses/by-sa/3.0/" rel="license noopener" target="_blank">CC BY-SA 3.0</a> &middot; kicks: <a href="samples/cc0/CREDITS.md">CC0 credits</a></p>
+<script src="remix-engine.js"></script>
+<script src="remix-editor.js"></script>
+<script src="remix-app.js"></script>
 </body>
 </html>

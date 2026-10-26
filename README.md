@@ -76,3 +76,17 @@ to fill it, edit a lane, then generate again.
 
 Then drag any mp3/wav/m4a/flac into `input/` — the remix appears in `output/`
 automatically. Ctrl-C to stop.
+
+## Remix app (index.html)
+
+The home page is now the remix app: drop a song (or its 4 stems), and it
+builds a hardtekk remix in the browser: the song sped up (+4 st default),
+re-arranged from its own 4-bar blocks, sustained in-key kicks that play the
+song's own 808 notes in the drops, double bells, risers, impacts, echo
+throws, tape stop, fades, and a blown-out master. Live mixer (level + 3-band
+EQ per bus), kick picker (CC0 kicks in samples/cc0), drum editor grid with
+MIDI export/import, arrangement shuffle, WAV render. The previous generator
+is at classic.html.
+
+Engine: remix-engine.js (runs in remix-worker.js; also in Node via
+tools/remix_node.js).
