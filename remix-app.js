@@ -25,7 +25,7 @@ function setFiles(list) {
   files = got;
   $("files").textContent = files.map(f => f.name).join("  ·  ");
   $("go").disabled = false; $("go").hidden = false;
-  if (meta) $("go").click();                          // a song is already loaded: replacing it starts the build
+  $("go").click();                                    // dropping or picking a song starts the build
 }
 $("drop").addEventListener("click", () => $("file").click());
 $("file").addEventListener("change", e => { setFiles(e.target.files); e.target.value = ""; });
@@ -187,11 +187,12 @@ function showMeta() {
 }
 
 /* ------------------------------------------------------------ kick + render */
-function kickOpts() { return { kickTune: +$("k-tune").value, tailLp: +$("k-tail").value, buzz: +$("k-buzz").value, kickDrive: +$("k-drive").value }; }
+function kickOpts() { return { kickTune: +$("k-tune").value, tailLp: +$("k-tail").value, buzz: +$("k-buzz").value, kickDrive: +$("k-drive").value, kickTone: $("k-tone").value, bassVoice: $("k-808").value, kickClick: $("k-sample").value === "synth" ? "synth" : "sample" }; }
 for (const id of ["k-tune", "k-tail", "k-buzz", "k-drive", "lufs"]) { const el = $(id), o = $(id + "-v"); el.addEventListener("input", () => o.textContent = el.value); }
 async function kickSample() {
-  const f = $("k-sample").value, r = await fetch("samples/" + f.split("/").map(encodeURIComponent).join("/"));
-  return { id: f, data: normPeak(await decode(new OfflineAudioContext(2, 1, SR), await r.arrayBuffer())) };
+  const f = $("k-sample").value === "synth" ? "kick-hardtekk_C.wav" : $("k-sample").value;   // "synth" generates the click; a sample still fills the slot
+  const r = await fetch("samples/" + f.split("/").map(encodeURIComponent).join("/"));
+  return { id: $("k-sample").value, data: normPeak(await decode(new OfflineAudioContext(2, 1, SR), await r.arrayBuffer())) };
 }
 $("k-apply").addEventListener("click", async () => { busy(true); log("re-rendering the kick ..."); worker.postMessage({ type: "kick", opts: kickOpts(), sample: await kickSample() }); });
 $("k-sample").addEventListener("change", () => meta && $("k-apply").click());
@@ -216,3 +217,9 @@ for (const id of ["fx-risers", "fx-impacts", "fx-echo", "fx-tape", "fx-fin", "fx
 // shuffle: a new arrangement dealt from the song's blocks; each number is reproducible
 let shuffleSeed = 0;
 $("shuffle").addEventListener("click", () => { if (!meta) return; busy(true); worker.postMessage({ type: "shuffle", seed: ++shuffleSeed }); });
+
+// kick tone / 808 voice: a drum-pass re-render (the dark 808 is computed once per arrangement)
+for (const id of ["k-tone", "k-808"]) $(id).addEventListener("change", () => {
+  if (!meta || busyNow()) return; pendingResume = playing ? position() : null; stop(false); busy(true);
+  worker.postMessage({ type: "score", score: meta.score, opts: kickOpts() });
+});

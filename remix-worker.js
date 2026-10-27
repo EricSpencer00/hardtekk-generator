@@ -55,9 +55,11 @@ onmessage = async e => {
       const { out, transfer } = copyLayers(S.b.layers);
       postMessage({ type: "built", layers: out, meta: summary(S.b) }, transfer);
     } else if (m.type === "kick") {
+      const t0 = Date.now();
       S.opts = { ...S.opts, ...m.opts };
       if (m.sample) { S.samples.kick = m.sample.data; S.samples._kickId = m.sample.id; delete S.samples._kickNorm; }
       S.b = R.mixScore(S.b.ctx, S.b.meta.score, S.samples, S.opts);       // same path as an edit: fades and FX stay on
+      R.LOG.fn(`kick re-rendered in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
       const { out, transfer } = copyLayers(S.b.layers);
       postMessage({ type: "built", layers: out, meta: summary(S.b) }, transfer);
     } else if (m.type === "master") {

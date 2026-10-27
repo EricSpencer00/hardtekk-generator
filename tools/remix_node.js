@@ -51,6 +51,7 @@ function loadSamples(dir, kickFile) {
   const opts = {}; if (get("--arrangement")) opts.arrangement = get("--arrangement");
   if (get("--shuffle")) { opts.arrangement = R.shuffleArrangement(an, +get("--shuffle")); lap("shuffled: " + opts.arrangement); }
   for (const f of ["risers", "impacts", "echo", "tapeStop"]) if (args.includes("--no-" + f)) opts[f] = false;
+  for (const a of args) { const m = /^--set=(\w+)=(.+)$/.exec(a); if (m) opts[m[1]] = isNaN(+m[2]) ? m[2] : +m[2]; }
   const b = await R.build(stems, samples, an, opts); lap(`built: ${b.meta.N_BARS} bars, ${b.meta.hits.length} kicks, ${b.meta.key}`);
   const m = await R.master(b.layers, b.meta, b.masks); lap(`mastered: ${m.lufs.toFixed(2)} LUFS`);
   fs.writeFileSync(out, Buffer.from(R.encodeWav(m.out)));

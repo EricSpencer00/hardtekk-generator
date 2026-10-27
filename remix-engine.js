@@ -238,16 +238,44 @@ function yinTrack(x, sr, fmin = 28, fmax = 120, frame = 1024, hop = 128) {
   for (let f = 0; f < nF; f++) if (rms[f] < rmax * 0.05) voiced[f] = 0;
   return { t, f0, rms, voiced };
 }
-/** Loudness-weighted pitch class in [t0, t1) of a track; null if nothing voiced. */
+/** Loudness-weighted pitch class in [t0, t1) of a track, counting the notes it settles on:
+ *  frames in the middle of a slide (pitch moving > 0.12 st per frame) count 10%. Null if nothing voiced. */
 function trackPc(tr, t0, t1, shift = 0) {
   const h = new Float64Array(12); let n = 0;
   for (let i = 0; i < tr.t.length; i++) {
     if (tr.t[i] < t0 || tr.t[i] >= t1 || !tr.voiced[i]) continue;
-    const pc = ((Math.round(hzToMidi(tr.f0[i])) % 12) + 12) % 12; h[pc] += tr.rms[i]; n++;
+    const m = hzToMidi(tr.f0[i]), pc = ((Math.round(m) % 12) + 12) % 12;
+    const prev = i > 0 && tr.voiced[i - 1] ? Math.abs(m - hzToMidi(tr.f0[i - 1])) : 0, next = i + 1 < tr.t.length && tr.voiced[i + 1] ? Math.abs(hzToMidi(tr.f0[i + 1]) - m) : 0;
+    h[pc] += tr.rms[i] * (Math.max(prev, next) > 0.12 ? 0.1 : 1); n++;
   }
   if (n < 4) return null;
   let b = 0; for (let i = 1; i < 12; i++) if (h[i] > h[b]) b = i;
   return (b + shift + 120) % 12;
+}
+
+/** The bassline as notes: settled frames only (slides and blips < 40 ms dropped), snapped to the
+ *  song's semitones. Gaps under 150 ms hold the previous note. Kick and dark 808 both read this. */
+function noteTimeline(tr, cents = 0) {
+  const notes = [], dt = tr.t.length > 1 ? tr.t[1] - tr.t[0] : 0.006;
+  let cur = null;
+  for (let i = 0; i < tr.t.length; i++) {
+    const steady = tr.voiced[i] && (i === 0 || !tr.voiced[i - 1] || Math.abs(hzToMidi(tr.f0[i]) - hzToMidi(tr.f0[i - 1])) < 0.12)
+                   && (i + 1 >= tr.t.length || !tr.voiced[i + 1] || Math.abs(hzToMidi(tr.f0[i + 1]) - hzToMidi(tr.f0[i])) < 0.12);
+    if (!steady) continue;
+    const m = Math.round(hzToMidi(tr.f0[i]) - cents / 100);
+    if (cur && cur.m === m && tr.t[i] - cur.e < 0.15) cur.e = tr.t[i] + dt;
+    else { if (cur) notes.push(cur); cur = { m, s: tr.t[i], e: tr.t[i] + dt }; }
+  }
+  if (cur) notes.push(cur);
+  const kept = notes.filter(n => n.e - n.s >= 0.04);
+  for (let i = 0; i + 1 < kept.length; i++) if (kept[i + 1].s - kept[i].e < 0.15) kept[i].e = kept[i + 1].s;   // hold through short gaps
+  return kept;
+}
+/** Pitch class of the timeline note covering most of [t0, t1); null if none. */
+function noteAt(notes, t0, t1) {
+  let best = null, bo = 0;
+  for (const n of notes) { if (n.e <= t0) continue; if (n.s >= t1) break; const o = Math.min(n.e, t1) - Math.max(n.s, t0); if (o > bo) { bo = o; best = n; } }
+  return best ? ((best.m % 12) + 12) % 12 : null;
 }
 
 /* ------------------------------------------------------------ analysis */
@@ -545,6 +573,11 @@ const DEFAULTS = {
   arrangement: "",          // empty = automatic
   fadeInBars: 2, fadeOutBars: 8,
   risers: true, impacts: true, echo: true, tapeStop: true,
+  kickTone: "dark",         // "punch" | "dark": softer click, deeper pitch drop, sub-heavy tail
+  bassVoice: "dark",        // "song" | "dark": outside the drops, the song's 808 or a dark sub resynthesised from it
+  bassLo: 29, bassHi: 58,   // every bass note (kick tails, dark 808) is folded into this one-octave window, Hz
+  bellTune: false,          // false: the bell plays at its own pitch
+  kickClick: "sample",      // "sample" | "synth": the kick's attack from the sample or generated (no sample pitch)
 };
 
 /* ------------------------------------------------------------ build the remix */
@@ -723,9 +756,11 @@ async function build(stems, samples, an, opts = {}, progress = () => {}, cache =
    *  drops, so it must be the song's bassline, not a guess. Falls back to the last 808 note heard,
    *  then to the bar's root. */
   let last808 = null;
+  const bassNotes = A.bassNotes || (A.bassNotes = noteTimeline(out808, an.tuneCents || 0));
   const kickNote = (obi, b, dur) => {
     const t0 = ot(obi, b), len = barInfo[obi].kind === "drop" ? Math.min(0.3, (dur || 0.5) * BEAT) : Math.min(0.15, (dur || 0.5) * BEAT);
-    const pc = trackPc(out808, t0 + 0.02, t0 + len);
+    const heard = barInfo[obi].kind === "drop" ? Math.min(0.3, (dur || 0.5) * BEAT) : 0.12;   // how long this kick is heard
+    const pc = noteAt(bassNotes, t0 + 0.02, t0 + heard);               // the bass note while this kick sounds
     if (pc !== null) { last808 = pc; return pc; }
     return last808 ?? barRoot[obi];
   };
@@ -754,7 +789,7 @@ async function build(stems, samples, an, opts = {}, progress = () => {}, cache =
   // double bell: _x_x two bars before each drop, transposed (at most 3 st) to fit that bar's key
   const bellProf = pcProfile(samples.bell.map(c => filt(c, "high", 150, 2)), 0.02, 1.5, 150, 6000);
   for (const b of blocks.filter((b, i) => b.kind === "drop" && (i === 0 || blocks[i - 1].kind !== "drop"))) if (b.out >= 2) {
-    const semis = bestKeyShift(bellProf, scaleOf(b.out - 2));
+    const semis = o.bellTune ? bestKeyShift(bellProf, scaleOf(b.out - 2)) : 0;
     for (const bt of [1, 3]) score.bell.push({ s: step(b.out - 2, bt), g: 0.5, semis });
   }
   const arrangement = blocks.map(b => `${b.kind}:${b.src}:${b.n}`).join(", ");
@@ -791,12 +826,45 @@ function mixScore(ctx, score, samples, opts) {
   for (const [a, e, f0, f1, pw, kind] of A.sweeps) for (const c of bed) svf(c, a, e, i => f0 * Math.pow(f1 / f0, Math.pow((i - a) / (e - a), pw)), kind);
   const vox = A.voxComp.map(c => { const y = zeros(N); for (let i = 0; i < N; i++) y[i] = c[i] * (1 - drumM[i] * (1 - dk12[i])) * (1 + dropM[i] * lift) * 1.15; return y; });
   const meta = { tuneCents: ctx.tuneCents, blocks, barInfo, plan: ctx.plan, hits, OB0, BEAT, BAR, N, N_BARS, bpm: 60 / BEAT, key: ctx.key, scale: ctx.scale, arrangement: ctx.arrangement, score };
-  const L = { bed, bass808: A.bass808.map(c => c.slice()), vocals: vox, perc: layers.perc, fx: layers.fx };
+  const dk = `${o.bassLo}|${o.bassHi}`;
+  if (o.bassVoice === "dark" && A.bassDarkKey !== dk) { A.bassDark = darkSub(A, o.bassLo, o.bassHi, ctx.tuneCents || 0); A.bassDarkKey = dk; }
+  const bassSrc = o.bassVoice === "dark" ? A.bassDark : A.bass808;
+  const dkB = duck(N, kickTimes, 0.9, 0.08);                             // one low sound at a time: the bass gets out of the kick's way
+  const bass808 = bassSrc.map(c => Float32Array.from(c, (v, i) => v * (1 - (1 - dropM[i]) * (1 - dkB[i]))));
+  const L = { bed, bass808, vocals: vox, perc: layers.perc, fx: layers.fx };
   L.kick = renderKick(samples, meta, o, act);
   score.kick.forEach((e, i) => { e.hz = hits[i].hz; });                // the frequency actually played, for MIDI
   L.sfx = st2(N);
   applyEffects(L, meta, o);
   return { layers: L, meta, masks: { drumM, dropM, act }, ctx };
+}
+
+/** A dark, deep sub that plays the song's 808 line note for note (pitch track incl. glides,
+ *  the 808's own loudness), in place of the 808 itself outside the drops. */
+function darkSub(A, fLo = 32.7, fHi = 61.8, cents = 0) {
+  const tr = A.out808, N = A.N, y = zeros(N), notes = A.bassNotes || [];
+  const frameAt = i => Math.min(tr.t.length - 1, Math.max(0, Math.round((i / SR - tr.t[0]) / (tr.t[1] - tr.t[0] || 1))));
+  let rmax = 0; for (let i = 0; i < tr.rms.length; i++) rmax = Math.max(rmax, tr.rms[i]);
+  const fold = m => { let f = midiToHz(m + cents / 100); while (f >= fHi) f /= 2; while (f < fLo) f *= 2; return f; };
+  let ni = 0, f = 0, a = 0, ph = 0;
+  const glide = 1 - Math.exp(-1 / (0.008 * SR)), lvl = 1 - Math.exp(-1 / (0.005 * SR));
+  for (let i = 0; i < N; i++) {
+    const t = i / SR;
+    while (ni < notes.length && notes[ni].e <= t) ni++;
+    const on = ni < notes.length && notes[ni].s <= t;
+    const fT = on ? fold(notes[ni].m) : (f || 40), aT = on ? tr.rms[frameAt(i)] / (rmax || 1) : 0;
+    f += (fT - f) * (f ? glide : 1); a += (aT - a) * lvl;            // 8 ms glide between notes
+    ph += 2 * Math.PI * f / SR; y[i] = Math.tanh(1.2 * Math.sin(ph)) * a;
+  }
+  const lo = filt(filt(y, "low", 160, 4), "high", 25, 2);
+  // match the 808 layer's loudness, keep its section mask and sweeps (it is silent in the drops)
+  const ref = A.bass808, m = mono(ref);
+  let er = 0, ed = 0; for (let i = 0; i < N; i++) { er += m[i] * m[i]; }
+  const out = [Float32Array.from(lo), Float32Array.from(lo)];
+  for (let i = 0; i < N; i++) { const g = 1 - A.dropM[i]; out[0][i] *= g; out[1][i] *= g; ed += out[0][i] * out[0][i]; }
+  for (const [s0, e, f0, f1, pw, kind] of A.sweeps) for (const c of out) svf(c, s0, e, i => f0 * Math.pow(f1 / f0, Math.pow((i - s0) / (e - s0), pw)), kind);
+  const g = Math.sqrt(er / (ed || 1)); for (const c of out) for (let i = 0; i < N; i++) c[i] *= g;
+  return out;
 }
 
 /* ------------------------------------------------------------ effects */
@@ -865,9 +933,19 @@ function applyEffects(L, meta, o) {
 const _kickCache = new Map();
 function renderKick(samples, meta, opts, act = null) {
   const o = { ...DEFAULTS, ...opts }, N = meta.N;
-  const noteHz = pc => 32.703 * Math.pow(2, (((pc % 12) + 12) % 12) / 12 + (meta.tuneCents || 0) / 1200);   // octave 1, at the song's tuning
+  const noteHz = pc => {                                               // folded into the bass window, at the song's tuning
+    let hz = 32.703 * Math.pow(2, (((pc % 12) + 12) % 12) / 12 + (meta.tuneCents || 0) / 1200);
+    while (hz >= o.bassHi) hz /= 2; while (hz < o.bassLo) hz *= 2; return hz;
+  };
+  if (o.kickClick === "synth" && !samples._synthKick) {               // a generated attack: fast sine sweep + a 2 ms noise tick
+    const n = Math.round(0.4 * SR), y = zeros(n), r = mulberry(99); let ph = 0;
+    for (let i = 0; i < n; i++) { const t = i / SR, f = 48 + 170 * Math.exp(-t / 0.018); ph += 2 * Math.PI * f / SR; y[i] = Math.sin(ph) * Math.exp(-t / 0.3) + (t < 0.002 ? (r() * 2 - 1) * 0.5 * (1 - t / 0.002) : 0); }
+    samples._synthKick = [y, Float32Array.from(y)];
+  }
+  const kickSrc = o.kickClick === "synth" ? "synth" : "sample";
+  if (samples._kickNormSrc !== kickSrc) { delete samples._kickNorm; samples._kickNormSrc = kickSrc; }
   const base = samples._kickNorm || (samples._kickNorm = (() => {             // peak-normalised, leading silence trimmed
-    const y = normPeak(samples.kick); let i0 = 0; while (i0 < y[0].length && Math.max(Math.abs(y[0][i0]), Math.abs(y[1][i0])) < 0.02) i0++;
+    const y = normPeak(kickSrc === "synth" ? samples._synthKick : samples.kick); let i0 = 0; while (i0 < y[0].length && Math.max(Math.abs(y[0][i0]), Math.abs(y[1][i0])) < 0.02) i0++;
     return y.map(c => c.slice(Math.max(0, i0 - 16)));
   })());
   /** The sample's first ~20 ms (the click; later its pitch is still sliding and sounds sharp),
@@ -876,31 +954,37 @@ function renderKick(samples, meta, opts, act = null) {
    *  tail, so every note is in tune and keeps the same tone. */
   const kickFor = (pc, long) => {
     const hz = noteHz(pc) * Math.pow(2, o.kickTune / 12);
-    const key = [samples._kickId || "kick", hz.toFixed(3), long, o.tailLp, o.buzz, o.kickDrive].join("|");
+    const dark = o.kickTone === "dark";
+    const key = [kickSrc === "synth" ? "synth" : (samples._kickId || "kick"), hz.toFixed(3), long, o.tailLp, o.buzz, o.kickDrive, o.kickTone].join("|");
     if (_kickCache.has(key)) return _kickCache.get(key);
     // Kicks with a fast, wide pitch drop keep their whole drop (it reads as punch) up to where the
     // pitch settles; a slow, narrow slide (the classic kick) would sound sharp, so it keeps 20 ms only.
     const sp = kickSettle(base), nat = sp.tail;
-    const att = repitch2(base, Math.max(-8, Math.min(5, 12 * Math.log2(hz / nat) - (sp.fast ? 0 : 2.5))));
-    const lo = filtfilt(mono(att), "low", 150), at = sp.fast ? sp.settle * nat / hz : 0.02;
+    // the sample's click is only nudged (<= 2 st): big shifts smear it. The generated tail carries the note.
+    const shift = Math.max(-2, Math.min(2, 12 * Math.log2(hz / nat) - (sp.fast ? 0 : 2.5)));
+    let att = repitch2(base, shift);
+    if (dark) att = filt2(att, "low", 2500);                           // a softer, less poppy click
+    const lo = filtfilt(mono(att), "low", 150), at = sp.fast ? sp.settle * Math.pow(2, -shift / 12) : 0.02;
     let xs = Math.round(at * SR);                                        // splice on an upward zero crossing
     for (let i = Math.round((at - 0.004) * SR); i < Math.round((at + 0.012) * SR); i++) if (lo[i] < 0 && lo[i + 1] >= 0) { xs = i; break; }
     const len = Math.round((long ? 0.5 : 0.16) * SR + xs), out = st2(len), xf = Math.round(0.004 * SR);
     const ampAt = Math.max(1e-3, (() => { let m = 0; for (let i = xs - 200; i < xs; i++) m = Math.max(m, Math.abs(lo[i])); return m; })());
-    let ph = 0; const th = Math.tanh(o.kickDrive);
+    const drive = dark ? 1.3 : o.kickDrive, settle = dark ? [0.6, 0.025] : [0.15, 0.01];
+    let ph = 0; const th = Math.tanh(drive);
     for (let i = 0; i < len; i++) {
       const t = i / SR, f = hz * (1 + 0.6 * Math.exp(-t / 0.012));
       let tail = 0;
       if (i >= xs - xf) {
         const tt = (i - xs) / SR;
         const env = long ? (tt < 0.05 ? 1 : 0.85 + 0.15 * Math.exp(-(tt - 0.05) / 0.15)) : Math.exp(-Math.max(tt, 0) / 0.04);
-        tail = Math.tanh(o.kickDrive * Math.sin(ph)) / th * env;
-        ph += 2 * Math.PI * (i < xs ? hz : hz * (1 + 0.15 * Math.exp(-tt / 0.01))) / SR;
+        tail = Math.tanh(drive * Math.sin(ph)) / th * env;
+        ph += 2 * Math.PI * (i < xs ? hz : hz * (1 + settle[0] * Math.exp(-tt / settle[1]))) / SR;   // the drop into the note
       }
       const w = i < xs - xf ? 0 : i >= xs ? 1 : (i - (xs - xf)) / xf;
       for (let c = 0; c < 2; c++) { const a_ = i < att[c].length ? att[c][i] : 0; out[c][i] = a_ * (1 - w) + tail * w * Math.max(ampAt, 0.5); }
     }
-    let y = filt2(out, "low", o.tailLp, 2);
+    let y = filt2(out, "low", dark ? Math.min(o.tailLp, 240) : o.tailLp, 2);
+    if (dark) y = y.map(c => biquad(c, rbj("lowshelf", 60, 0.7, SR, 3)));
     y = normPeak(y.map(c => { biquad(c, rbj("peak", 2200, 0.6, SR, -4)); return c; }));
     // tune the tail (what is heard as the note), not the click
     for (let k = 0; long && k < 3; k++) {                                // short tails are generated exact; too short to measure
@@ -919,7 +1003,7 @@ function renderKick(samples, meta, opts, act = null) {
     h.hz = noteHz(h.pc) * Math.pow(2, o.kickTune / 12);
     const k = kickFor(h.pc, h.long);
     let y = slice2(k, 0, Math.round(Math.min(gap - 0.004, k[0].length / SR) * SR));
-    if (h.kind !== "drop") y = filt2(filt2(y, "high", 140), "high", 140);   // the song's 808 is the bass here: no second sub
+    // outside the drops the bass layer ducks under each kick (see mixScore), so the kick keeps its body
     if (h.lp) y = filt2(y, "low", h.lp);
     place(bus, fadeOut(y, 0.006), h.t);
   });

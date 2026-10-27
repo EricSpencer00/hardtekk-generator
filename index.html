@@ -150,14 +150,19 @@ a.dl { color: var(--led); font-weight: 700; }
           <div class="rack-body">
             <label class="ctl"><span class="label">sample</span>
               <select id="k-sample">
+                <option value="cc0/ka1-acer-kick.wav" selected>KA1 acer</option>
+                <option value="synth">ours (generated)</option>
                 <option value="kick-hardtekk_C.wav">classic</option>
-                <option value="cc0/ka1-acer-kick.wav">KA1 acer</option>
                 <option value="cc0/harddancewarrior-hardstyle-kick-250.wav">hardstyle 250</option>
                 <option value="cc0/ka1-kick-2-hardtekk.wav">KA1 hardtekk 2</option>
                 <option value="cc0/catfox-hard-tekk-kick-1.wav">cat-fox hard tekk</option>
                 <option value="cc0/cyclez-hardtek-kick.wav">cyclez hardtek</option>
                 <option value="cc0/arctis-hardstyle-kick-20.wav">arctis hardstyle 20</option>
               </select></label>
+            <div class="row">
+              <label class="ctl"><span class="label">kick tone</span><select id="k-tone"><option value="dark" selected>dark</option><option value="punch">punch</option></select></label>
+              <label class="ctl"><span class="label">808</span><select id="k-808"><option value="dark" selected>dark</option><option value="song">song</option></select></label>
+            </div>
             <div class="strip">
               <label>tune <input type="range" id="k-tune" min="-3" max="3" step="0.1" value="0"><output id="k-tune-v">0.0</output></label>
               <label>tail <input type="range" id="k-tail" min="100" max="3000" step="50" value="900"><output id="k-tail-v">900</output></label>
