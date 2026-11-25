@@ -742,13 +742,14 @@ async function analyzePhrases(stems, an, progress = () => {}) {
     how = rep.length ? "loudest repeated" : "loudest";
   }
   if (how === "loop") list.forEach(p => p.hook = true);
-  // hook runs (consecutive hook phrases): the first drop takes the strongest (mean score); later drops take
-  // runs that repeat it with at least half its material, strongest first, else the strongest again
+  // hook runs (consecutive hook phrases): the strongest (mean score) first, then the runs that repeat it with at
+  // least half its material, then the other hook runs; drop k starts with run k
   let hookRuns = []; list.forEach((p, i) => { if (!p.hook) return; const r = hookRuns[hookRuns.length - 1]; if (r && list[i - 1] === r[r.length - 1]) r.push(p); else hookRuns.push([p]); });
   const dur = r => r.reduce((s, p) => s + p.t1 - p.on, 0), rs_ = r => avg(r.map(p => p.score));
   if (hookRuns.length) {
     const top = hookRuns.reduce((a, b) => rs_(b) > rs_(a) ? b : a), ti = top.map(p => list.indexOf(p));
-    hookRuns = [top, ...hookRuns.filter(r => r !== top && dur(r) >= 0.5 * dur(top) && r.some(p => ti.some(i => S[i][list.indexOf(p)] >= thr))).sort((a, b) => rs_(b) - rs_(a))];
+    const rep = hookRuns.filter(r => r !== top && dur(r) >= 0.5 * dur(top) && r.some(p => ti.some(i => S[i][list.indexOf(p)] >= thr))).sort((a, b) => rs_(b) - rs_(a));
+    hookRuns = [top, ...rep, ...hookRuns.filter(r => r !== top && !rep.includes(r)).sort((a, b) => rs_(b) - rs_(a))];
   }
   log(`  phrases: ${all.length} found, ${list.length} usable (voiced share >= ${(0.5 * vfMed).toFixed(2)});${snapped ? ` ${snapped} with no clear beat around them start on their bar line;` : ""} hook by ${how} (evidence ${conf.toFixed(1)} SD): ${hookRuns.map(r => r.map(p => p.on.toFixed(1)).join("+")).join(", ")} s`);
   progress(1);
@@ -1128,12 +1129,18 @@ async function buildChop(stems, samples, an, o, progress, cache) {
     if (at + p.bars > end) return -1;
     placed.push({ p, bar: at, block: b }); lastEnd = ot(at) + out(p, p.t1); return at + p.bars;
   };
+  // a drop plays its hook run, then the song's other hook phrases in its order, looping; no phrase more than 4 times
+  // in a drop: when nothing else fits, the vocal rests and the groove carries the remaining bars
+  const hookAll = runs.flat().sort((x, y) => x.on - y.on);
   for (const b of blocks) {
-    const end = b.out + b.n - (b.kind === "build" ? 2 : 0);               // a build's last 2 bars: the hook stutter
+    const end = b.out + b.n - (b.kind === "build" ? 1 : 0);               // a build's last bar: the hook stutter
     let bar = b.out;
     if (b.kind === "drop") {
-      const run = runs[Math.min(di++, runs.length - 1)] || [];
-      for (let k = 0, miss = 0; run.length && bar < end && miss < run.length; k++) { const nx = tryPut(run[k % run.length], bar, end, b); if (nx < 0) miss++; else { bar = nx; miss = 0; } }
+      const run = runs[Math.min(di++, runs.length - 1)] || [], seq = [...run, ...hookAll.filter(p => !run.includes(p))], plays = new Map();
+      for (let k = 0, miss = 0; seq.length && bar < end && miss < seq.length; k++) {
+        const p = seq[k % seq.length]; if ((plays.get(p) || 0) >= 4) { miss++; continue; }
+        const nx = tryPut(p, bar, end, b); if (nx < 0) miss++; else { bar = nx; miss = 0; plays.set(p, (plays.get(p) || 0) + 1); }
+      }
     } else for (let n = 0; n < verse.length && bar < end; n++) {
       const p = verse[vi % verse.length], nx = tryPut(p, bar, end, b);
       if (nx >= 0) { bar = nx; vi++; } else if (p.bars > end - b.out) vi++; else break;
@@ -1152,7 +1159,7 @@ async function buildChop(stems, samples, an, o, progress, cache) {
 
   const ck = `${o.semis}|${o.bpm}|${blocks.map(b => b.kind + b.n).join(",")}`;
   if (!cache.chop || cache.chop.key !== ck) cache.chop = { key: ck, ...(await renderChops(stems, ph, placed, blocks, { T, BAR, R, m, N, ot, out }, o, progress)) };
-  const { vox, bed, leak } = cache.chop;
+  const { vox, bed, leak, stutter } = cache.chop;
 
   // the groove: the templates as a score; kick and bass play each bar's root
   const score = { kick: [], bass: [], snare: [], hat: [], bell: [] }, plan = [];
@@ -1188,7 +1195,7 @@ async function buildChop(stems, samples, an, o, progress, cache) {
   const sweeps = blocks.filter(b => b.kind === "build").map(b => [Math.round(ot(b.out + b.n - 2) * SR), Math.round(ot(b.out + b.n) * SR), 30, 800, 1.5, "hp"]);
   const { voxComp, act } = vocalBus(vox, dropM);
   const A = { blocks, barInfo, N, N_BARS, BEAT, BAR, OB0, ot, drumM, dropM, bedPre: bed, bedPres: bed.map(c => band(c, 900, 4200)), voxComp, act, sweeps };
-  const chop = { bpm: o.bpm, semis: o.semis, m, asked, hook: ph.hook, triplet: ph.triplet, leak, inEngine: !!stems.inEngine,
+  const chop = { bpm: o.bpm, semis: o.semis, m, asked, hook: ph.hook, triplet: ph.triplet, leak, stutter, inEngine: !!stems.inEngine,
     phrases: ph.all.map(p => ({ i: p.i, t0: p.t0, t1: p.t1, on: p.on, q: p.q, P: p.P, vf: p.vf, gridOk: p.gridOk, used: byId.has(p.i), hook: !!byId.get(p.i)?.hook, alpha: byId.get(p.i)?.alpha, rep: p.rep, nrep: p.nrep, loud: p.loud, score: p.score })),
     placed: placed.map(pl => ({ i: pl.p.i, bar: pl.bar, bars: pl.p.bars, kind: pl.block.kind, alpha: pl.p.alpha, bar0: pl.p.bar0, on: pl.p.on, s0: pl.p.s0, t1: pl.p.t1, q: pl.p.q, hook: pl.p.hook })),
     roots: roots.map(r => ({ pc: r.pc, how: r.how, src: r.src, phrase: r.phrase, carried: !!r.carried })) };
@@ -1229,20 +1236,22 @@ async function renderChops(stems, ph, placed, blocks, g, o, progress) {
     }
     if (k % 4 === 0) { progress(0.5 + 0.35 * k / placed.length); await tick(); }
   }
-  // the hook stutter: its first 8th, in 8ths then 16ths, up to the drop's pickup
+  // the hook stutter: its first 8th, four times in 8ths over the last two beats before the drop, up to its pickup
+  const stutter = [];
   blocks.forEach((b, i) => {
     if (b.kind !== "build") return;
     const first = placed.find(pl => pl.block === blocks[i + 1]), p = first ? first.p : placed.find(pl => pl.p.hook)?.p;
     if (!p) return;
     const a = Math.round(p.on * SR), e = Math.round((p.on + p.P / (2 * m)) * SR);
     const chop = stretch(repitch2(slice2(stems.vocals, a, e), o.semis), p.alpha), stop = first ? ot(first.bar) + out(p, p.s0) - 0.01 : Infinity;
-    for (let s = 0; s < 24; s++) {
-      const bar = b.out + b.n - 2 + (s < 8 ? 0 : 1), q = s < 8 ? s / 2 : (s - 8) / 4, len = s < 8 ? T / 2 : T / 4, t = ot(bar, q);
-      const n = Math.round(Math.min(len, stop - t) * SR); if (n < 64) break;
-      place(vox, fadeOut(fadeIn(slice2(chop, 0, n), 0.002), 0.008), t, 0.5 + 0.35 * s / 23);
+    let hits = 0;
+    for (let s = 0; s < 4; s++) {
+      const t = ot(b.out + b.n - 1, 2 + s / 2), n = Math.round(Math.min(T / 2, stop - t) * SR); if (n < 64) break;
+      place(vox, fadeOut(fadeIn(slice2(chop, 0, n), 0.002), 0.008), t, 0.55 + 0.1 * s); hits++;
     }
+    stutter.push({ bar: b.out + b.n - 1, hits });
   });
-  return { vox, bed, leak };
+  return { vox, bed, leak, stutter };
 }
 
 /** Continuous mode: the whole song sped up on its own (detected) beat grid, the new drums on top. */
