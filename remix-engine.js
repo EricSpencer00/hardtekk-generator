@@ -102,19 +102,33 @@ const SINC_TAB = (() => {
   }
   return t;
 })();
+/** x read at fractional position t (samples), band-limited to `cut` of Nyquist. */
+function sincAt(x, t, cut) {
+  const half = SINC_ZC / cut, a = Math.max(0, Math.ceil(t - half)), b = Math.min(x.length - 1, Math.floor(t + half));
+  let s = 0;
+  for (let j = a; j <= b; j++) {
+    const d = Math.abs(t - j) * cut * SINC_RES, k = d | 0;
+    if (k >= SINC_TAB.length - 1) continue;
+    const fr = d - k; s += x[j] * (SINC_TAB[k] + (SINC_TAB[k + 1] - SINC_TAB[k]) * fr);
+  }
+  return s * cut;
+}
 function resample(x, fromRate, toRate) {
   const ratio = fromRate / toRate, cut = Math.min(1, 1 / ratio) * 0.97;
-  const n = Math.floor(x.length / ratio), y = zeros(n), half = SINC_ZC / cut;
+  const n = Math.floor(x.length / ratio), y = zeros(n);
+  for (let i = 0; i < n; i++) y[i] = sincAt(x, i * ratio, cut);
+  return y;
+}
+/** Varispeed onto a rigid grid: source time src[k] (s) lands at dst[k]; linear in between and beyond. */
+function warpTime(x, src, dst) {
+  const K = src.length, edge = (src[K - 1] - src[0]) / (dst[K - 1] - dst[0]);
+  const n = Math.max(1, Math.floor((dst[K - 1] + (x.length / SR - src[K - 1]) / edge) * SR)), y = zeros(n);
+  let k = 0;
   for (let i = 0; i < n; i++) {
-    const t = i * ratio, c = Math.floor(t);
-    let s = 0;
-    const a = Math.max(0, Math.ceil(t - half)), b = Math.min(x.length - 1, Math.floor(t + half));
-    for (let j = a; j <= b; j++) {
-      const d = Math.abs(t - j) * cut * SINC_RES, k = d | 0;
-      if (k >= SINC_TAB.length - 1) continue;
-      const fr = d - k; s += x[j] * (SINC_TAB[k] + (SINC_TAB[k + 1] - SINC_TAB[k]) * fr);
-    }
-    y[i] = s * cut;
+    const u = i / SR; while (k < K - 2 && u >= dst[k + 1]) k++;
+    const r = u < dst[0] || u >= dst[K - 1] ? edge : (src[k + 1] - src[k]) / (dst[k + 1] - dst[k]);
+    const t = u < dst[0] ? src[0] + (u - dst[0]) * r : u >= dst[K - 1] ? src[K - 1] + (u - dst[K - 1]) * r : src[k] + (u - dst[k]) * r;
+    y[i] = t >= 0 ? sincAt(x, t * SR, Math.min(1, 1 / r) * 0.97) : 0;
   }
   return y;
 }
@@ -322,7 +336,27 @@ function beatGrid(drums) {
     if (n < 16) break;
     per = (n * skt - sk * st_) / (n * skk - sk * sk); ph = (st_ - per * sk) / n; ph = ((ph % per) + per) % per;
   }
-  return { bpm: 60 / per, b0: ph, R: best.R, nKicks: kp.length };
+  // the song's own beats where its tempo moves (live drummer, rubato, tempo automation): dynamic
+  // programming over the onset envelope (Ellis 2007), smoothed over +-4 beats against frame jitter
+  const P = per * SR / 128, sd = Math.sqrt(o.reduce((s, v) => s + v * v, 0) / o.length) || 1, score = new Float64Array(o.length), back = new Int32Array(o.length).fill(-1);
+  for (let t = 0; t < o.length; t++) {
+    let bs = 0, bi = -1;
+    for (let u = t - Math.round(2 * P); u <= t - Math.round(P / 2); u++) { if (u < 0) continue; const v = score[u] - 100 * Math.log((t - u) / P) ** 2; if (v > bs) { bs = v; bi = u; } }
+    score[t] = o[t] / sd + bs; back[t] = bi;
+  }
+  let end = o.length - 1; for (let t = Math.max(0, o.length - Math.round(P)); t < o.length; t++) if (score[t] > score[end]) end = t;
+  const raw = []; for (let t = end; t >= 0; t = back[t]) raw.unshift((t * 128 + 512) / SR);
+  const beats = raw.map((_, i) => {
+    let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (let j = Math.max(0, i - 4); j <= Math.min(raw.length - 1, i + 4); j++) { n++; sx += j; sy += raw[j]; sxx += j * j; sxy += j * raw[j]; }
+    const m = (n * sxy - sx * sy) / (n * sxx - sx * sx || 1); return (sy - m * sx) / n + m * i;
+  });
+  // evidence: how tightly the drum onsets sit on each grid (1 = every onset on a beat)
+  // (beats and 8ths: hats on the off-beats count as evidence too)
+  const fit = phase => { let W = 0; const z = [0, 0, 0, 0]; ft.forEach((t, j) => { const p = phase(t); if (isNaN(p)) return; W += fw[j]; for (const m of [1, 2]) { z[2 * m - 2] += fw[j] * Math.cos(2 * Math.PI * m * p); z[2 * m - 1] += fw[j] * Math.sin(2 * Math.PI * m * p); } }); return (Math.hypot(z[0], z[1]) + Math.hypot(z[2], z[3])) / (2 * W || 1); };
+  const Rrigid = fit(t => (t - ph) / per);
+  let k = 0; const Rbeats = fit(t => { while (k > 0 && beats[k] > t) k--; while (k + 1 < beats.length && beats[k + 1] <= t) k++; return k + 1 < beats.length && t >= beats[0] ? (t - beats[k]) / (beats[k + 1] - beats[k]) : NaN; });
+  return { bpm: 60 / per, b0: ph, R: best.R, nKicks: kp.length, beats, Rrigid, Rbeats, nOnsets: ft.length };
 }
 /** Per-beat RMS (dB) of a signal. */
 function perBeat(x, b0, beat, nb) {
@@ -369,8 +403,21 @@ function triadRoot(c) {
 
 /** Everything about the source we need: grid, map of parts per beat, chords, key, the 808's notes. */
 async function analyze(stems, progress = () => {}) {
-  const dm = mono(stems.drums), bm = mono(stems.bass), om = mono(stems.other), vm = mono(stems.vocals);
-  const grid = beatGrid(dm); progress(0.2); await tick();
+  let dm = mono(stems.drums), grid = beatGrid(dm), warp = null;
+  // A song whose tempo moves is warped onto a rigid grid (the stems are replaced in place), but only when its
+  // tracked beats stray from one fixed tempo by more than a flam (10 ms, p90) AND explain the drum onsets better
+  // than one tempo by more than chance (2 / sqrt(onsets): two standard errors of the phase concentration).
+  const B = grid.beats, K = B.length, perW = K > 8 ? (B[K - 1] - B[0]) / (K - 1) : 0;
+  const stray = K > 8 ? Float32Array.from(B, (t, k) => Math.abs(t - (B[0] + k * perW))).sort()[Math.floor(0.9 * K)] : 0;
+  log(`  beats: one tempo explains the drum onsets ${grid.Rrigid.toFixed(2)}, the tracked beats ${grid.Rbeats.toFixed(2)}; tracked beats stray ${Math.round(stray * 1000)} ms (p90) from one tempo; ${grid.nOnsets} onsets`);
+  if (stray > 0.010 && grid.Rbeats - grid.Rrigid > 2 / Math.sqrt(grid.nOnsets || 1)) {
+    const dst = Array.from(B, (_, k) => B[0] + k * perW); warp = { src: B, dst };
+    for (const k of ["vocals", "drums", "bass", "other"]) stems[k] = stems[k].map(c => warpTime(c, B, dst));
+    dm = mono(stems.drums); grid = { ...grid, bpm: 60 / perW, b0: B[0] % perW };
+    log(`  warped onto a rigid ${(60 / perW).toFixed(2)} BPM grid`);
+  }
+  const bm = mono(stems.bass), om = mono(stems.other), vm = mono(stems.vocals);
+  progress(0.2); await tick();
   const beat = 60 / grid.bpm, dur = dm.length / SR;
   let nb = Math.floor((dur - grid.b0) / beat);
   const kickL = filtfilt(dm, "low", 120), snL = band(dm, 1000, 6000);
@@ -383,8 +430,15 @@ async function analyze(stems, progress = () => {}) {
     let a = 0, b = 0; for (let j = 0; j < 4; j++) { a += lanesDb[k][i - 1 - j]; b += lanesDb[k][i + j]; }
     nov[i] += Math.abs(b - a) / 4;
   }
+  // and the backbeat: kick on 1 and 3, snare on 2 and 4. Per bar, (kick - snare) on 1+3 minus on 2+4; when its
+  // mean is more than 3 standard errors from zero it fixes which pair of beats can be beat 1 (half-time
+  // grooves, snare on 3 only, average out to zero here and leave the choice to the section changes)
+  const bb = []; for (let i = 0; i + 3 < nb; i += 4) { const d = j => lanesDb.kick[i + j] - lanesDb.snare[i + j]; bb.push((d(0) + d(2) - d(1) - d(3)) / 2); }
+  const bm_ = bb.reduce((a, v) => a + v, 0) / (bb.length || 1), bse = Math.sqrt(bb.reduce((a, v) => a + (v - bm_) ** 2, 0) / Math.max(1, bb.length - 1) / (bb.length || 1)) || 1;
+  const parity = Math.abs(bm_ / bse) > 3 ? (bm_ > 0 ? 0 : 1) : null;
   let off = 0, bs = -1;
-  for (let o = 0; o < 4; o++) { let s = 0; for (let i = o; i < nb; i += 4) s += nov[i] * ((i - o) % 16 === 0 ? 2 : 1); if (s > bs) { bs = s; off = o; } }
+  for (let o = 0; o < 4; o++) { if (parity !== null && o % 2 !== parity) continue; let s = 0; for (let i = o; i < nb; i += 4) s += nov[i] * ((i - o) % 16 === 0 ? 2 : 1); if (s > bs) { bs = s; off = o; } }
+  log(`  downbeat: backbeat evidence ${(bm_ / bse).toFixed(1)} SE${parity === null ? " (weak: section changes decide)" : ""}, bars start on beat ${off + 1} of the grid`);
   const b0 = grid.b0 + off * beat; nb -= off;
   for (const k in ev) ev[k] = ev[k].slice(off);
   const nBars = Math.floor(nb / 4);
@@ -403,7 +457,7 @@ async function analyze(stems, progress = () => {}) {
   for (let i = 0; i < bassTrack.t.length; i++) if (bassTrack.voiced[i]) { const m = hzToMidi(bassTrack.f0[i]), d = m - Math.round(m), w = bassTrack.rms[i]; cs += w * Math.sin(2 * Math.PI * d); cc += w * Math.cos(2 * Math.PI * d); }
   const tuneCents = Math.round(Math.atan2(cs, cc) / (2 * Math.PI) * 100);
   const bassPc = []; for (let hb = 0; hb < nBars * 2; hb++) bassPc.push(trackPc(bassTrack, b0 + hb * 2 * beat + 0.05, b0 + (hb + 1) * 2 * beat));
-  return { bpm: grid.bpm, b0, beat, nBars, gridR: grid.R, ev, chords, key, bassPc, tuneCents };
+  return { bpm: grid.bpm, b0, beat, nBars, gridR: grid.R, ev, chords, key, bassPc, tuneCents, warp };
 }
 
 /* ------------------------------------------------------------ arrangement */
