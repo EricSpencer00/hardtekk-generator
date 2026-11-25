@@ -752,7 +752,11 @@ async function analyzePhrases(stems, an, progress = () => {}) {
   }
   log(`  phrases: ${all.length} found, ${list.length} usable (voiced share >= ${(0.5 * vfMed).toFixed(2)});${snapped ? ` ${snapped} with no clear beat around them start on their bar line;` : ""} hook by ${how} (evidence ${conf.toFixed(1)} SD): ${hookRuns.map(r => r.map(p => p.on.toFixed(1)).join("+")).join(", ")} s`);
   progress(1);
-  return { all, list, hookRuns: hookRuns.map(r => r.map(p => p.i)), hook: { how, conf }, notes, P0 };
+  // feel: the drums' onsets against the beat, straight 16ths or 8th-note triplets (harmonic 4 vs 3 of their phase)
+  const dph = src.on.t.map(beatPos), Rh = h => Math.hypot(avg(dph.map(x => Math.cos(2 * Math.PI * h * x))), avg(dph.map(x => Math.sin(2 * Math.PI * h * x))));
+  const triplet = Rh(3) > Rh(4);
+  if (triplet) log(`  feel: triplet (drum onsets on 8th-note triplets ${Rh(3).toFixed(2)}, on 16ths ${Rh(4).toFixed(2)}): off-beat hat and bass on the triplet`);
+  return { all, list, hookRuns: hookRuns.map(r => r.map(p => p.i)), hook: { how, conf }, notes, P0, triplet };
 }
 /** The bass root for the source span [a, b) of a phrase: the song's bass note sounding longest there (>= 35% of
  *  the span), else the backing's triad root, else the tonic of the phrase's best-fit key, else the span's
@@ -1171,7 +1175,7 @@ async function buildChop(stems, samples, an, o, progress, cache) {
         if (x("snare", s)) score.snare.push({ s: st, g: 0.22 });
         if (x("roll", s)) score.snare.push({ s: st, g: 0.06 + 0.24 * Math.pow(((i - r0) * 16 + s) / ((b.n - r0) * 16), 1.5) });
         if (x("hat", s)) score.hat.push({ s: st, g: 0.34 });
-        if (lane.h16 && o.h16 && s % 2) score.hat.push({ s: st, g: 0.13 });
+        if (lane.h16 && o.h16 && !ph.triplet && s % 2) score.hat.push({ s: st, g: 0.13 });
       }
       const lp = b.kind === "intro" ? 200 * Math.pow(2, 0.6 * i) : b.kind === "outro" && i >= b.n - 4 ? 3000 * Math.pow(2, -0.8 * (i - b.n + 5)) : null;
       plan.push({ lp, fill: !!lane.fill, kind: b.kind });
@@ -1184,12 +1188,12 @@ async function buildChop(stems, samples, an, o, progress, cache) {
   const sweeps = blocks.filter(b => b.kind === "build").map(b => [Math.round(ot(b.out + b.n - 2) * SR), Math.round(ot(b.out + b.n) * SR), 30, 800, 1.5, "hp"]);
   const { voxComp, act } = vocalBus(vox, dropM);
   const A = { blocks, barInfo, N, N_BARS, BEAT, BAR, OB0, ot, drumM, dropM, bedPre: bed, bedPres: bed.map(c => band(c, 900, 4200)), voxComp, act, sweeps };
-  const chop = { bpm: o.bpm, semis: o.semis, m, asked, hook: ph.hook, leak, inEngine: !!stems.inEngine,
+  const chop = { bpm: o.bpm, semis: o.semis, m, asked, hook: ph.hook, triplet: ph.triplet, leak, inEngine: !!stems.inEngine,
     phrases: ph.all.map(p => ({ i: p.i, t0: p.t0, t1: p.t1, on: p.on, q: p.q, P: p.P, vf: p.vf, gridOk: p.gridOk, used: byId.has(p.i), hook: !!byId.get(p.i)?.hook, alpha: byId.get(p.i)?.alpha, rep: p.rep, nrep: p.nrep, loud: p.loud, score: p.score })),
     placed: placed.map(pl => ({ i: pl.p.i, bar: pl.bar, bars: pl.p.bars, kind: pl.block.kind, alpha: pl.p.alpha, bar0: pl.p.bar0, on: pl.p.on, s0: pl.p.s0, t1: pl.p.t1, q: pl.p.q, hook: pl.p.hook })),
     roots: roots.map(r => ({ pc: r.pc, how: r.how, src: r.src, phrase: r.phrase, carried: !!r.carried })) };
   log(`  chop: ${o.bpm.toFixed(1)} BPM, ${o.semis >= 0 ? "+" : ""}${o.semis} st, 1 song beat = ${m} beat(s), stretch ${use.length ? use.map(p => p.alpha).sort((a, b) => a - b).filter((_, k, a) => k === 0 || k === a.length - 1).map(v => v.toFixed(2)).join("-") : "-"}, ${placed.length} phrases placed; ` + blocks.map(b => `${b.name}:${b.n}`).join(" "));
-  const ctx = { mode: "chop", tuneCents: an.tuneCents || 0, A, plan, scales: [], key: `${NAMES[keyPc]} ${an.key.mode}`, scale: [], arrangement: blocks.map(b => `${b.kind}:${b.n}`).join(", "), o, chop };
+  const ctx = { mode: "chop", tuneCents: an.tuneCents || 0, A, plan, scales: [], key: `${NAMES[keyPc]} ${an.key.mode}`, scale: [], arrangement: blocks.map(b => `${b.kind}:${b.n}`).join(", "), o, chop, swing: ph.triplet };
   progress(0.9); await tick();
   const r = mixScore(ctx, score, samples, o);
   progress(1);
@@ -1341,12 +1345,13 @@ function mixScore(ctx, score, samples, opts) {
   const clean = (arr) => arr.filter(e => e.s >= 0 && e.s < N_BARS * 16).sort((a, b) => a.s - b.s);
   score = { kick: clean(score.kick), bass: clean(score.bass || []), snare: clean(score.snare), hat: clean(score.hat), bell: clean(score.bell) };
   const hits = score.kick.map(e => { const bar = barOf(e.s), bi = barInfo[bar]; return { t: t(e.s), s: e.s, pc: ((e.pc % 12) + 12) % 12, scale: ctx.scales[bar], lp: ctx.plan[bar].lp, long: bi.kind === "drop", kind: bi.kind, bar }; });
-  const bassT = score.bass.map(e => t(e.s));                           // a kick ends where the next kick or bass note starts
+  const sw = e => ctx.swing && e.s % 4 === 2 ? BEAT / 6 : 0;         // triplet feel: the off-beat 8th on the triplet's last third
+  const bassT = score.bass.map(e => t(e.s) + sw(e));                           // a kick ends where the next kick or bass note starts
   hits.forEach((h, j) => { h.end = Math.min(j + 1 < hits.length ? hits[j + 1].t : h.t + 1, bassT.find(x => x > h.t + 1e-4) ?? Infinity); });
   const layers = { perc: st2(N), fx: st2(N) };
   const snare = samples._snareF || (samples._snareF = filt2(samples.snare, "high", 200)), hat = samples.hat;
   for (const e of score.snare) place(layers.perc, snare, t(e.s), e.g ?? 0.22);
-  for (const e of score.hat) place(layers.perc, hat, t(e.s), e.g ?? 0.34);
+  for (const e of score.hat) place(layers.perc, hat, t(e.s) + sw(e), e.g ?? 0.34);
   const bellSrc = samples._bellF || (samples._bellF = samples.bell.map(c => filt(c, "high", 150, 2)));
   samples._bells = samples._bells || new Map();
   for (const e of score.bell) {
@@ -1359,7 +1364,7 @@ function mixScore(ctx, score, samples, opts) {
   const bed = A.bedPre.map((c, ci) => { const p = A.bedPres[ci], y = zeros(N); for (let i = 0; i < N; i++) y[i] = (c[i] - p[i] * 0.55 * act[i]) * (1 - drumM[i] * (1 - dk25[i])); return y; });
   for (const [a, e, f0, f1, pw, kind] of A.sweeps) for (const c of bed) svf(c, a, e, i => f0 * Math.pow(f1 / f0, Math.pow((i - a) / (e - a), pw)), kind);
   const vox = A.voxComp.map(c => { const y = zeros(N); for (let i = 0; i < N; i++) y[i] = c[i] * (1 - drumM[i] * (1 - dk12[i])) * (1 + dropM[i] * lift) * 1.15; return y; });
-  const meta = { tuneCents: ctx.tuneCents, blocks, barInfo, plan: ctx.plan, hits, OB0, BEAT, BAR, N, N_BARS, bpm: 60 / BEAT, key: ctx.key, scale: ctx.scale, arrangement: ctx.arrangement, score, mode: ctx.mode, chop: ctx.chop };
+  const meta = { tuneCents: ctx.tuneCents, blocks, barInfo, plan: ctx.plan, hits, OB0, BEAT, BAR, N, N_BARS, bpm: 60 / BEAT, key: ctx.key, scale: ctx.scale, arrangement: ctx.arrangement, score, mode: ctx.mode, chop: ctx.chop, swing: !!ctx.swing };
   const kickBus = renderKick(samples, meta, o, act);                   // first: the bass ends where each kick starts
   let bass808 = st2(N);
   if (ctx.mode !== "chop") {                                            // the song's 808, or a dark sub playing its line
@@ -1562,7 +1567,7 @@ function renderKick(samples, meta, opts, act = null) {
 /** The score's bass lane: a driven two-saw stab per note an octave over the kick's tail, cut before the next
  *  kick or bass note, so kick and bass never sound together. Level: -12 dB RMS over the first drop. */
 function renderBass(events, meta, o) {
-  const { N, OB0, BEAT } = meta, bus = zeros(N), kicks = meta.hits.map(h => h.start ?? h.t), times = events.map(e => OB0 + e.s * BEAT / 4);
+  const { N, OB0, BEAT } = meta, bus = zeros(N), kicks = meta.hits.map(h => h.start ?? h.t), times = events.map(e => OB0 + e.s * BEAT / 4 + (meta.swing && e.s % 4 === 2 ? BEAT / 6 : 0));
   events.forEach((e, j) => {
     const t0 = times[j], end = Math.min(kicks.find(x => x > t0 + 1e-4) ?? Infinity, times[j + 1] ?? Infinity, t0 + 2 * BEAT);
     const n = Math.round((end - t0 - 0.004) * SR), i0 = Math.round(t0 * SR);
