@@ -1174,8 +1174,12 @@ async function master(layers, meta, masks, mixOpts = {}, progress = () => {}) {
   progress(0.2); await tick();
   const target = mixOpts.targetLufs ?? DEFAULTS.targetLufs;
   const run = g => brickwall(brickwall(clipOs(mix.map(c => Float32Array.from(c, v => v * Math.pow(10, g / 20))), 1), -0.8), -0.3);
-  let g = target - lufs(mix), out = null;
-  for (let k = 0; k < 3; k++) { out = run(g); const l = lufs(out); if (Math.abs(target - l) < 0.15) break; g += target - l; progress(0.5 + 0.15 * (k + 1)); await tick(); }
+  let g = target - lufs(mix), out = null, prev = null;
+  for (let k = 0; k < 3; k++) {                                       // secant steps: the clipper gives back less than 1 dB per dB
+    out = run(g); const l = lufs(out); if (Math.abs(target - l) < 0.15) break;
+    const slope = prev ? Math.min(1, Math.max(0.2, (l - prev[1]) / (g - prev[0]))) : 1; prev = [g, l];
+    g += (target - l) / slope; progress(0.5 + 0.15 * (k + 1)); await tick();
+  }
   const end = Math.min(N, Math.round((meta.OB0 + meta.N_BARS * meta.BAR + 0.5) * SR));
   out = out.map(c => c.slice(0, end));
   fadeOut(out, 0.3); fadeIn(out, 0.01);                                 // the song's fades are in the layers
