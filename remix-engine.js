@@ -136,6 +136,59 @@ function warpTime(x, src, dst) {
 const repitch = (x, semis) => Math.abs(semis) < 1e-4 ? Float32Array.from(x) : resample(x, SR * Math.pow(2, semis / 12), SR);
 const repitch2 = (s, semis) => [repitch(s[0], semis), repitch(s[1], semis)];
 
+/* ------------------------------------------------------------ time stretch (pitch kept) */
+/** WSOLA: stereo x stretched to `alpha` x its length, pitch unchanged. Hann frames of 35 ms at 50% overlap;
+ *  each reads the input near its ideal place, moved by up to 11.6 ms so it continues the previous frame's
+ *  waveform. Onsets (input samples) stay whole and exactly on time: the frame nearest each one reads it
+ *  at onset x alpha, frames still holding it continue that read, earlier frames stop at it and later
+ *  frames start there. The result's .plan replays the same reads on another signal of the same length. */
+function stretch(x, alpha, onsets = [], plan = null) {
+  const N = 1536, HS = N / 2, L = x[0].length, w = hann(N);
+  if (!plan) {
+    const Lo = Math.max(1, Math.round(L * alpha)), K = Math.ceil(Lo / HS) + 1, D = 4, TOL = 128, M = HS / D;
+    const m = mono(x), nd = Math.ceil(L / D), d = new Float32Array(nd);
+    for (let i = 0; i < L; i++) d[(i / D) | 0] += m[i];
+    const at = i => i >= 0 && i < nd ? d[i] : 0, xm = i => i >= 0 && i < L ? m[i] : 0;
+    const lock = new Map();
+    for (const c of onsets) { const k = Math.round(c * alpha / HS); if (k >= 0 && k < K && !lock.has(k)) lock.set(k, c); }
+    const p = new Int32Array(K), lo = new Int32Array(K), hi = new Int32Array(K).fill(L), keys = [...lock.keys()].sort((a, b) => a - b);
+    let held = -1;                                                        // the last locked onset
+    for (let k = 0; k < K; k++) {
+      const o = k * HS, tau = Math.round(o / alpha);
+      if (lock.has(k)) { held = lock.get(k); p[k] = Math.round(held + o - held * alpha); continue; }
+      if (k === 0) { p[k] = tau; continue; }
+      if (held >= 0 && p[k - 1] + HS - N / 2 < held) { p[k] = p[k - 1] + HS; continue; }
+      const ref = Math.floor((p[k - 1] + HS - N / 2) / D), c0 = Math.floor((tau - N / 2) / D);
+      let best = 0, bv = -Infinity;
+      for (let dl = -TOL; dl <= TOL; dl++) {
+        let c = 0, e = 1e-9; for (let j = 0; j < M; j++) { const v = at(c0 + dl + j); c += v * at(ref + j); e += v * v; }
+        if (c / Math.sqrt(e) > bv) { bv = c / Math.sqrt(e); best = dl; }
+      }
+      let pk = tau + best * D; bv = -Infinity;                            // refine to the sample
+      for (let f = -D; f <= D; f++) {
+        let c = 0, e = 1e-9; for (let j = 0; j < HS; j += 2) { const v = xm(tau + best * D + f - N / 2 + j); c += v * xm(p[k - 1] + HS - N / 2 + j); e += v * v; }
+        if (c / Math.sqrt(e) > bv) { bv = c / Math.sqrt(e); pk = tau + best * D + f; }
+      }
+      p[k] = pk;
+    }
+    for (let k = 0, j = 0; k < K; k++) {                                  // reads never cross an onset that is not theirs
+      while (j < keys.length && keys[j] < k) j++;
+      if (j > 0) lo[k] = lock.get(keys[j - 1]);
+      const nx = keys[j] === k ? j + 1 : j; if (nx < keys.length) hi[k] = lock.get(keys[nx]);
+    }
+    plan = { p, lo, hi, K, Lo };
+  }
+  const { p, lo, hi, K, Lo } = plan, y = st2(Lo), ws = new Float32Array(Lo);
+  for (let k = 0; k < K; k++) for (let j = 0; j < N; j++) {
+    const oi = k * HS - N / 2 + j, ii = p[k] - N / 2 + j;
+    if (oi < 0 || oi >= Lo || ii < lo[k] || ii >= hi[k] || ii < 0 || ii >= L) continue;
+    y[0][oi] += x[0][ii] * w[j]; y[1][oi] += x[1][ii] * w[j]; ws[oi] += w[j];
+  }
+  for (let i = 0; i < Lo; i++) { const g = 1 / Math.max(ws[i], 0.1); y[0][i] *= g; y[1][i] *= g; }
+  y.plan = plan;
+  return y;
+}
+
 /* ------------------------------------------------------------ separation (no stems given) */
 /** HPSS + centre extraction. Returns stems like Demucs would, approximately:
  *  drums = percussive, bass = harmonic below 120 Hz, vocals = centred harmonic
@@ -295,6 +348,18 @@ function onsetFlux(x, hop = 128, n = 1024) {
   }
   return { o, hop, n };
 }
+/** Onsets: each spectral-flux peak moved to the steepest rise of the envelope in the 40 ms before it.
+ *  Returns times (s), strengths, and the flux itself. */
+function onsetTimes(x, minGap = 0.05, thr = 0.2) {
+  const { o } = onsetFlux(x, 128, 1024), pk = peaks(o, Math.round(minGap * SR / 128), thr);
+  const env = smooth(Float32Array.from(filt(x, "high", 60, 2), Math.abs), Math.round(0.002 * SR));
+  const t = pk.map(i => {
+    const c = i * 128 + 512, a = Math.max(1, c - Math.round(0.04 * SR)), e = Math.min(env.length - 1, c + Math.round(0.01 * SR));
+    let bi = a, bd = -1; for (let j = a; j < e; j++) { const d = env[j] - env[j - 1]; if (d > bd) { bd = d; bi = j; } }
+    return bi / SR;
+  });
+  return { t, s: pk.map(i => o[i]), o };
+}
 function peaks(o, minDist, thrRel = 0.3) {
   let mx = 0; for (let i = 0; i < o.length; i++) if (o[i] > mx) mx = o[i];
   const out = [];
@@ -319,14 +384,7 @@ function beatGrid(drums) {
   for (let bpm = 70; bpm <= 200; bpm += 0.01) { const r = circFit(kp, null, 60 / bpm); if (r.R > best.R) best = { R: r.R, bpm }; }
   let bpm = best.bpm; while (bpm < 100) bpm *= 2; while (bpm >= 200) bpm /= 2;
   // drum onsets refined to the steepest rise of the broadband envelope
-  const { o } = onsetFlux(drums, 128, 1024);
-  const pk = peaks(o, Math.round(0.05 * SR / 128), 0.2);
-  const env = smooth(Float32Array.from(filt(drums, "high", 60, 2), Math.abs), Math.round(0.002 * SR));
-  const ft = pk.map(i => {
-    const c = i * 128 + 512, a = Math.max(1, c - Math.round(0.04 * SR)), e = Math.min(env.length - 1, c + Math.round(0.01 * SR));
-    let bi = a, bd = -1; for (let j = a; j < e; j++) { const d = env[j] - env[j - 1]; if (d > bd) { bd = d; bi = j; } }
-    return bi / SR;
-  }), fw = pk.map(i => o[i]);
+  const { t: ft, s: fw, o } = onsetTimes(drums, 0.05, 0.2);
   let per = 60 / bpm, ph = circFit(ft, fw, per).phase;
   // least-squares period and phase on the strong onsets near the grid
   const fwMed = Float32Array.from(fw).sort()[fw.length >> 1] || 0;
@@ -1245,6 +1303,6 @@ function encodeWav(st, sr = SR) {
   return b;
 }
 
-const API = { SR, NAMES, DEFAULTS, LOG, separate, analyze, autoArrange, parseArrangement, build, mixScore, renderKick, encodeMidi, decodeMidi, shuffleArrangement, master, previewTone, encodeWav, lufs, resample, repitch, yinTrack, mono };
+const API = { SR, NAMES, DEFAULTS, LOG, separate, analyze, autoArrange, parseArrangement, build, mixScore, renderKick, encodeMidi, decodeMidi, shuffleArrangement, master, previewTone, encodeWav, lufs, resample, repitch, stretch, fft, yinTrack, mono };
 if (typeof module !== "undefined" && module.exports) module.exports = API; else root.REMIX = API;
 })(typeof self !== "undefined" ? self : this);
