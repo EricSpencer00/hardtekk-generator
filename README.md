@@ -79,20 +79,43 @@ automatically. Ctrl-C to stop.
 
 ## Remix app (index.html)
 
-The home page is now the remix app: drop a song (or its 4 stems), and it
-builds a hardtekk remix in the browser: the song sped up (+4 st default),
-put on a rigid beat grid (a song whose tempo moves is varispeeded onto it),
-arranged in its own order on its 8-bar phrase lines with the drops on its
-hook, sustained in-key kicks that play the song's own 808 notes in the
-drops, double bells, risers, impacts, echo throws, tape stop, fades, and a
-blown-out master. Live mixer (level + 3-band EQ per bus, played through the
-render's master), kick picker (CC0 kicks in samples/cc0), drum editor grid
-with MIDI export/import, arrangement shuffle, WAV render. The previous
-generator is at classic.html.
+The home page is the remix app: drop a song (or its 4 stems: vocals / drums /
+bass / other, e.g. from Demucs; the vocal is far cleaner than the in-browser
+separation), and it builds a hardtekk remix in the browser.
 
-Score a render against the original song (beat, downbeat, cuts, hook, key):
-`node tools/remix_node.js out.wav --mix song.wav --layers` then
-`python listen.py out.wav --song song.wav`.
+**Chop mode (default).** The groove exists before the song is looked at: a
+fixed tempo (175 BPM default) and hand-written section templates in a fixed
+form (intro 8, build 8, drop 16, break 8, build 8, drop 16, outro 8; intro,
+build, drop, outro when the song has little vocal). Drops: distorted tonal
+kick on every beat, off-beat bass that stops before the next kick, clap on 2
+and 4, off-beat hat, 16th hats from bar 9. Builds: backbeat, a snare roll
+that doubles, kick in 8ths, a bar of roll, riser, and a stutter of the hook's
+first syllable. Breaks: no kick. Elements enter and leave on 8-bar lines. The
+song becomes samples: its vocal is cut into phrases, each starts on a bar
+line (a pickup lands before it) and is time-stretched with its pitch kept
+(WSOLA, onsets locked) from its own tempo onto whole beats; drops play the
+hook (the loudest, most-repeated phrase run), the other sections the other
+phrases in the song's order. Each bar's kick and bass note is the root of
+the source passage its phrase plays there (the song's bass note, else its
+chord, else its key), so songs that change key or tempo are followed phrase
+by phrase. The song's own drums and bass are never used; its backing plays
+high-passed in breaks and builds only. Pitch (+4 st default) is a separate,
+deliberate shift.
+
+**Continuous mode** (the mode selector) is the previous engine: the whole
+song sped up on its detected beat grid with new drums on top.
+
+Both: double bells, risers, impacts, echo throws, tape stop, fades, a
+blown-out master, live mixer (level + 3-band EQ per bus, played through the
+render's master), kick picker (CC0 kicks in samples/cc0), drum editor grid
+(kick, bass, snare, hats, bell) with MIDI export/import, WAV render. The
+previous generator is at classic.html.
+
+Score a render against the original song and its true stems (timing,
+stretch, harmony, hook, leakage, kick/bass overlap, loudness, form):
+`node tools/remix_node.js out.wav --mix song.wav --truth stems/ --layers`
+then `python listen.py out.wav --song song.wav --stems stems/`.
+`node tools/stretch_check.js` checks the time stretcher itself.
 
 Engine: remix-engine.js (runs in remix-worker.js; also in Node via
 tools/remix_node.js).
