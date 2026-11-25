@@ -98,7 +98,11 @@ a.dl { color: var(--led); font-weight: 700; }
           <h2>Build</h2>
           <div class="rack-body">
             <div class="row">
-              <label class="ctl"><span class="label">speed</span>
+              <label class="ctl"><span class="label">mode</span>
+                <select id="mode"><option value="chop" selected>chop</option><option value="continuous">continuous</option></select></label>
+              <label class="ctl"><span class="label">bpm</span>
+                <select id="bpm"><option>170</option><option selected>175</option><option>180</option><option>185</option><option>190</option></select></label>
+              <label class="ctl"><span class="label">pitch</span>
                 <select id="semis">
                   <option value="0">original</option><option value="2">+2 st</option><option value="3">+3 st</option>
                   <option value="4" selected>+4 st</option><option value="5">+5 st</option><option value="7">+7 st</option>
@@ -139,9 +143,9 @@ a.dl { color: var(--led); font-weight: 700; }
               <button id="e-apply" disabled>apply</button>
               <button id="e-midi">export MIDI</button>
               <label class="row label">import MIDI <input type="file" id="e-midi-in" accept=".mid,.midi,audio/midi"></label>
-              <span class="label">click: add / remove &middot; scroll a kick: note &middot; shift + scroll: whole bar</span>
+              <span class="label">click: add / remove &middot; scroll a note: pitch &middot; shift + scroll: whole bar</span>
             </div>
-            <div id="e-wrap"><canvas id="e-grid" height="104"></canvas></div>
+            <div id="e-wrap"><canvas id="e-grid" height="138"></canvas></div>
           </div>
         </section>
 

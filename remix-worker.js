@@ -22,7 +22,7 @@ function summary(b) {
   const m = b.meta;
   return { bpm: m.bpm, key: m.key, scale: m.scale, bars: m.N_BARS, kicks: m.hits.length, arrangement: m.arrangement,
            blocks: m.blocks.map(x => ({ name: x.name, kind: x.kind, src: x.src, n: x.n, out: x.out })), OB0: m.OB0, BAR: m.BAR,
-           N_BARS: m.N_BARS, score: m.score };
+           N_BARS: m.N_BARS, score: m.score, mode: m.mode };
 }
 async function build(opts) {
   S.opts = opts;

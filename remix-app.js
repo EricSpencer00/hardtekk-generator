@@ -46,7 +46,7 @@ function stemRole(name) { const n = name.toLowerCase(); return ["vocals", "drums
 
 /* ------------------------------------------------------------ build */
 function fxOpts() { return { risers: $("fx-risers").checked, impacts: $("fx-impacts").checked, echo: $("fx-echo").checked, tapeStop: $("fx-tape").checked, fadeInBars: +$("fx-fin").value, fadeOutBars: +$("fx-fout").value }; }
-function opts() { return { semis: +$("semis").value, pattern: $("pattern").value, h16: $("h16").checked, ...kickOpts(), ...fxOpts() }; }
+function opts() { return { mode: $("mode").value, bpm: +$("bpm").value, semis: +$("semis").value, pattern: $("pattern").value, h16: $("h16").checked, ...kickOpts(), ...fxOpts() }; }
 $("go").addEventListener("click", async () => {
   stop(); busy(true); $("log").textContent = ""; prog(0); arrEdited = false; meta = null;
   try {
@@ -82,7 +82,11 @@ function update(o) {
 }
 const busyNow = () => $("render").disabled;
 const currentOpts = () => ({ ...opts(), ...(arrEdited ? { arrangement: $("arr").value.trim() } : {}) });
-for (const id of ["semis", "pattern", "h16"]) $(id).addEventListener("change", () => { clearTimeout(timer); timer = setTimeout(() => update(currentOpts()), 120); });
+for (const id of ["mode", "bpm", "semis", "pattern", "h16"]) $(id).addEventListener("change", () => { clearTimeout(timer); timer = setTimeout(() => update(currentOpts()), 120); });
+// the arrangement text differs per mode (chop: kind:bars, continuous: kind:src:bars); shuffle deals the song's own blocks
+const modeUi = () => { const chop = $("mode").value === "chop"; $("bpm").disabled = !chop; $("shuffle").hidden = chop; };
+$("mode").addEventListener("change", () => { arrEdited = false; modeUi(); });
+modeUi();
 $("arr").addEventListener("input", () => arrEdited = true);
 $("rebuild").addEventListener("click", () => { arrEdited = true; update(currentOpts()); });
 
@@ -194,7 +198,7 @@ function applyStrips() {
 function showMeta() {
   $("info").textContent = `${meta.bpm.toFixed(1)} BPM · ${meta.key} · ${meta.bars} bars · ${meta.kicks} kicks`;
   $("arr").value = meta.arrangement;
-  $("sections").innerHTML = meta.blocks.map(b => `<span class="k-${b.kind}" style="flex:${b.n}" title="${b.name} ← bars ${b.src}-${b.src + b.n - 1}">${b.name}</span>`).join("");
+  $("sections").innerHTML = meta.blocks.map(b => `<span class="k-${b.kind}" style="flex:${b.n}" title="${meta.mode === "chop" ? b.name : `${b.name} ← bars ${b.src}-${b.src + b.n - 1}`}">${b.name}</span>`).join("");
 }
 
 /* ------------------------------------------------------------ kick + render */
