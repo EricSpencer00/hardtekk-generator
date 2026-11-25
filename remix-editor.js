@@ -1,14 +1,14 @@
 /* remix-editor.js — the drum score as a grid you can edit.
  *
  * One column per 16th step, one row per voice. Click an empty cell to add a
- * hit, click a hit to remove it. Scroll on a kick to change its note
- * (shift + scroll: every kick in that bar). "apply" sends the score to the
+ * hit, click a hit to remove it. Scroll on a kick or bass note to change its note
+ * (shift + scroll: every note of that lane in the bar). "apply" sends the score to the
  * worker, which re-renders only the drums. MIDI export/import uses the same
  * score, so edits made in a DAW come back here.
  */
 (function () {
   const NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-  const LANES = [["kick", 34], ["snare", 18], ["hat", 18], ["bell", 18]];
+  const LANES = [["kick", 34], ["bass", 34], ["snare", 18], ["hat", 18], ["bell", 18]];
   const HEAD = 16, SW = 9;            // header height, px per 16th step
   const KIND = { drop: "#ff5a1f", build: "#c8781e", verse: "#8e837c", break: "#5a4f49", intro: "#6b2a1c", outro: "#6b2a1c" };
   let score = null, meta = null, canvas = null, wrap = null, onApply = null, dirty = false, playhead = -1;
@@ -35,7 +35,7 @@
       g.fillStyle = "#000"; g.fillRect(0, top + h - 1, W, 1);
       for (const e of score[name]) {
         const x = e.s * SW + 1, w = SW - 2;
-        if (name === "kick") {
+        if (name === "kick" || name === "bass") {
           g.fillStyle = `hsl(${(e.pc * 30) % 360} 80% 55%)`; g.fillRect(x, top + 2, w, h - 4);
           g.save(); g.translate(x + 7, top + h - 4); g.rotate(-Math.PI / 2); g.fillStyle = "#000"; g.font = "bold 9px Tahoma, sans-serif"; g.fillText(NAMES[e.pc], 0, 0); g.restore();
         } else {
@@ -50,10 +50,10 @@
   }
 
   function hitAt(name, s) { return score[name].findIndex(e => e.s === s); }
-  function defaultPc(s) {
-    const bar = Math.floor(s / 16), inBar = score.kick.filter(e => Math.floor(e.s / 16) === bar);
+  function defaultPc(s, lane) {
+    const bar = Math.floor(s / 16), inBar = score[lane].concat(score.kick).filter(e => Math.floor(e.s / 16) === bar);
     if (inBar.length) return inBar[0].pc;
-    const prev = score.kick.filter(e => e.s < s).pop(); return prev ? prev.pc : 0;
+    const prev = score[lane].filter(e => e.s < s).pop(); return prev ? prev.pc : 0;
   }
   function edited() { dirty = true; document.getElementById("e-apply").disabled = false; draw(); }
 
@@ -62,7 +62,7 @@
     if (!name) return;
     const s = Math.floor(x / SW), i = hitAt(name, s);
     if (i >= 0) score[name].splice(i, 1);
-    else if (name === "kick") score.kick.push({ s, pc: defaultPc(s) });
+    else if (name === "kick" || name === "bass") score[name].push({ s, pc: defaultPc(s, name) });
     else if (name === "hat") score.hat.push({ s, g: s % 4 === 2 ? 0.34 : 0.13 });
     else if (name === "snare") score.snare.push({ s, g: 0.22 });
     else score.bell.push({ s, g: 0.5, semis: (score.bell[score.bell.length - 1] || {}).semis ?? 0 });
@@ -70,12 +70,12 @@
   }
   function onWheel(ev) {
     const r = canvas.getBoundingClientRect(), y = ev.clientY - r.top;
-    if (laneAt(y) !== "kick") return;
-    const s = Math.floor((ev.clientX - r.left) / SW), i = hitAt("kick", s);
+    const lane = laneAt(y); if (lane !== "kick" && lane !== "bass") return;
+    const s = Math.floor((ev.clientX - r.left) / SW), i = hitAt(lane, s);
     if (i < 0) return;
     ev.preventDefault();
     const d = ev.deltaY < 0 ? 1 : -1, bar = Math.floor(s / 16);
-    const targets = ev.shiftKey ? score.kick.filter(e => Math.floor(e.s / 16) === bar) : [score.kick[i]];
+    const targets = ev.shiftKey ? score[lane].filter(e => Math.floor(e.s / 16) === bar) : [score[lane][i]];
     for (const e of targets) e.pc = (e.pc + d + 12) % 12;
     edited();
   }
@@ -94,11 +94,11 @@
       document.getElementById("e-midi-in").addEventListener("change", async ev => {
         const f = ev.target.files[0]; ev.target.value = ""; if (!f || !score) return;
         const s = self.REMIX.decodeMidi(await f.arrayBuffer());
-        for (const k of ["kick", "snare", "hat", "bell"]) score[k] = s[k];
-        edited(); opts.log(`MIDI loaded: ${s.kick.length} kicks, ${s.snare.length} snares, ${s.hat.length} hats, ${s.bell.length} bells — apply to hear it`);
+        for (const k of ["kick", "bass", "snare", "hat", "bell"]) score[k] = s[k];
+        edited(); opts.log(`MIDI loaded: ${s.kick.length} kicks, ${s.bass.length} bass notes, ${s.snare.length} snares, ${s.hat.length} hats, ${s.bell.length} bells — apply to hear it`);
       });
     },
-    load(m) { meta = m; score = JSON.parse(JSON.stringify(m.score)); dirty = false; document.getElementById("e-apply").disabled = true; draw(); },
+    load(m) { meta = m; score = { bass: [], ...JSON.parse(JSON.stringify(m.score)) }; dirty = false; document.getElementById("e-apply").disabled = true; draw(); },
     playhead(sec) {
       if (!meta) return;
       const s = Math.max(-1, (sec - meta.OB0) / (meta.BAR / 16)), was = playhead; playhead = s;

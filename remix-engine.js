@@ -192,8 +192,9 @@ function stretch(x, alpha, onsets = [], plan = null) {
 /* ------------------------------------------------------------ separation (no stems given) */
 /** HPSS + centre extraction. Returns stems like Demucs would, approximately:
  *  drums = percussive, bass = harmonic below 120 Hz, vocals = centred harmonic
- *  150 Hz - 6 kHz, other = the rest of the harmonic part. */
-async function separate(mix, progress = () => {}) {
+ *  150 Hz - 6 kHz, other = the rest of the harmonic part. `probes` ({name: stereo}, for measuring leakage) get
+ *  the same masks: probe[name].vocals is what of that signal ends up in the vocal stem. */
+async function separate(mix, progress = () => {}, probes = {}) {
   const N = 4096, HOP = 1024, B = N / 2 + 1, w = hann(N), L = mix[0].length;
   const F = Math.ceil(L / HOP) + 1;
   const mag = new Float32Array(F * B);
@@ -209,6 +210,7 @@ async function separate(mix, progress = () => {}) {
   const reL = new Float64Array(N), imL = new Float64Array(N), reR = new Float64Array(N), imR = new Float64Array(N);
   const tmp = new Float32Array(17), H = new Float32Array(B), P = new Float32Array(B);
   const kLo = Math.round(150 * N / SR), kHi = Math.round(6000 * N / SR);
+  const PR = Object.entries(probes).map(([name, x]) => ({ name, x, h: st2(L), v: st2(L), mh: new Float64Array(B), mv: new Float64Array(B) }));
   for (let f = 0; f < F; f++) {
     for (let k = 0; k < B; k++) {                       // harmonic: median across time
       let n = 0; for (let d = -8; d <= 8; d++) { const g = f + d; if (g >= 0 && g < F) tmp[n++] = mag[g * B + k]; }
@@ -233,6 +235,18 @@ async function separate(mix, progress = () => {}) {
       }
       reL[k] = lr; imL[k] = li; reR[k] = rr; imR[k] = ri;
       vre[0][k] = lr * mc; vim[0][k] = li * mc; vre[1][k] = rr * mc; vim[1][k] = ri * mc;
+      for (const pr of PR) { pr.mh[k] = mh; pr.mv[k] = mh * mc; }
+    }
+    for (const pr of PR) for (let c = 0; c < 2; c++) {                  // the same masks on each probe
+      const r = new Float64Array(N), i_ = new Float64Array(N);
+      for (let i = 0; i < N; i++) { const j = s + i; r[i] = j >= 0 && j < L ? pr.x[c][j] * w[i] : 0; }
+      fft(r, i_);
+      for (const [m, dst] of [[pr.mh, pr.h], [pr.mv, pr.v]]) {
+        const a = new Float64Array(N), b = new Float64Array(N);
+        for (let k = 0; k < B; k++) { a[k] = r[k] * m[k]; b[k] = i_[k] * m[k]; }
+        mirror(a, b, N); ifft(a, b);
+        for (let i = 0; i < N; i++) { const j = s + i; if (j >= 0 && j < L) dst[c][j] += a[i] * w[i]; }
+      }
     }
     for (const [r, i_] of [[reL, imL], [reR, imR], [vre[0], vim[0]], [vre[1], vim[1]]]) mirror(r, i_, N);
     ifft(reL, imL); ifft(reR, imR); ifft(vre[0], vim[0]); ifft(vre[1], vim[1]);
@@ -244,7 +258,8 @@ async function separate(mix, progress = () => {}) {
     }
     if (f % 200 === 0) { progress(0.25 + 0.75 * f / F); await tick(); }
   }
-  for (let j = 0; j < L; j++) { const g = 1 / Math.max(norm[j], 1e-3); for (const s of [out.h, out.v]) { s[0][j] *= g; s[1][j] *= g; } }
+  for (let j = 0; j < L; j++) { const g = 1 / Math.max(norm[j], 1e-3); for (const s of [out.h, out.v, ...PR.flatMap(p => [p.h, p.v])]) { s[0][j] *= g; s[1][j] *= g; } }
+  const probe = Object.fromEntries(PR.map(p => [p.name, { vocals: p.v, other: p.h.map((c, k) => { const lo = filtfilt(c, "low", 120, 4); return Float32Array.from(c, (x, j) => x - lo[j] - p.v[k][j]); }) }]));
   // zero-phase split: subtracting a phase-shifted low-pass would double the bass instead of removing it
   const drums = [zeros(L), zeros(L)], bass = [filtfilt(out.h[0], "low", 120, 4), filtfilt(out.h[1], "low", 120, 4)];
   const other = [zeros(L), zeros(L)];
@@ -252,7 +267,7 @@ async function separate(mix, progress = () => {}) {
     drums[c][j] = mix[c][j] - out.h[c][j];
     other[c][j] = out.h[c][j] - bass[c][j] - out.v[c][j];
   }
-  return { drums, bass, other, vocals: out.v };
+  return { drums, bass, other, vocals: out.v, inEngine: true, ...(PR.length ? { probe } : {}) };
 }
 function median(a, n) {
   const b = a.subarray(0, n); for (let i = 1; i < n; i++) { const v = b[i]; let j = i - 1; while (j >= 0 && b[j] > v) { b[j + 1] = b[j]; j--; } b[j + 1] = v; }
@@ -414,7 +429,7 @@ function beatGrid(drums) {
   const fit = phase => { let W = 0; const z = [0, 0, 0, 0]; ft.forEach((t, j) => { const p = phase(t); if (isNaN(p)) return; W += fw[j]; for (const m of [1, 2]) { z[2 * m - 2] += fw[j] * Math.cos(2 * Math.PI * m * p); z[2 * m - 1] += fw[j] * Math.sin(2 * Math.PI * m * p); } }); return (Math.hypot(z[0], z[1]) + Math.hypot(z[2], z[3])) / (2 * W || 1); };
   const Rrigid = fit(t => (t - ph) / per);
   let k = 0; const Rbeats = fit(t => { while (k > 0 && beats[k] > t) k--; while (k + 1 < beats.length && beats[k + 1] <= t) k++; return k + 1 < beats.length && t >= beats[0] ? (t - beats[k]) / (beats[k + 1] - beats[k]) : NaN; });
-  return { bpm: 60 / per, b0: ph, R: best.R, nKicks: kp.length, beats, Rrigid, Rbeats, nOnsets: ft.length };
+  return { bpm: 60 / per, b0: ph, R: best.R, nKicks: kp.length, beats, Rrigid, Rbeats, nOnsets: ft.length, on: { t: ft, s: fw } };
 }
 /** Per-beat RMS (dB) of a signal. */
 function perBeat(x, b0, beat, nb) {
@@ -459,9 +474,12 @@ function triadRoot(c) {
   return best;
 }
 
-/** Everything about the source we need: grid, map of parts per beat, chords, key, the 808's notes. */
+/** Everything about the source we need: grid, map of parts per beat, chords, key, the 808's notes.
+ *  `src` keeps the song's own beats in its own time for chop mode; continuous mode reads the stems
+ *  warped onto a rigid grid (`stemsW`) when the song's tempo moves. */
 async function analyze(stems, progress = () => {}) {
   let dm = mono(stems.drums), grid = beatGrid(dm), warp = null;
+  const src = { beats: grid.beats, per: 60 / grid.bpm, ph: grid.b0, on: grid.on, moving: false };
   // A song whose tempo moves is warped onto a rigid grid (the stems are replaced in place), but only when its
   // tracked beats stray from one fixed tempo by more than a flam (10 ms, p90) AND explain the drum onsets better
   // than one tempo by more than chance (2 / sqrt(onsets): two standard errors of the phase concentration).
@@ -469,8 +487,8 @@ async function analyze(stems, progress = () => {}) {
   const stray = K > 8 ? Float32Array.from(B, (t, k) => Math.abs(t - (B[0] + k * perW))).sort()[Math.floor(0.9 * K)] : 0;
   log(`  beats: one tempo explains the drum onsets ${grid.Rrigid.toFixed(2)}, the tracked beats ${grid.Rbeats.toFixed(2)}; tracked beats stray ${Math.round(stray * 1000)} ms (p90) from one tempo; ${grid.nOnsets} onsets`);
   if (stray > 0.010 && grid.Rbeats - grid.Rrigid > 2 / Math.sqrt(grid.nOnsets || 1)) {
-    const dst = Array.from(B, (_, k) => B[0] + k * perW); warp = { src: B, dst };
-    for (const k of ["vocals", "drums", "bass", "other"]) stems[k] = stems[k].map(c => warpTime(c, B, dst));
+    const dst = Array.from(B, (_, k) => B[0] + k * perW); warp = { src: B, dst }; src.moving = true;
+    stems = Object.fromEntries(["vocals", "drums", "bass", "other"].map(k => [k, stems[k].map(c => warpTime(c, B, dst))]));
     dm = mono(stems.drums); grid = { ...grid, bpm: 60 / perW, b0: B[0] % perW };
     log(`  warped onto a rigid ${(60 / perW).toFixed(2)} BPM grid`);
   }
@@ -517,7 +535,143 @@ async function analyze(stems, progress = () => {}) {
   const tuneCents = Math.round(Math.atan2(cs, cc) / (2 * Math.PI) * 100);
   const bassPc = []; for (let hb = 0; hb < nBars * 2; hb++) bassPc.push(trackPc(bassTrack, b0 + hb * 2 * beat + 0.05, b0 + (hb + 1) * 2 * beat));
   const barDb = Array.from({ length: nBars }, (_, b) => 10 * Math.log10(fullDb.slice(4 * b, 4 * b + 4).reduce((x, v) => x + Math.pow(10, v / 10), 0) / 4));
-  return { bpm: grid.bpm, b0, beat, nBars, gridR: grid.R, ev, chords, key, bassPc, tuneCents, warp, barDb };
+  return { bpm: grid.bpm, b0, beat, nBars, gridR: grid.R, ev, chords, key, bassPc, tuneCents, warp, barDb, src, stemsW: warp ? stems : null };
+}
+
+/* ------------------------------------------------------------ chop mode: the vocal as phrases */
+const avg = a => a.reduce((s, v) => s + v, 0) / (a.length || 1);
+const sdev = a => { const m = avg(a); return Math.sqrt(avg(a.map(v => (v - m) ** 2))); };
+const pcOf = m => ((Math.round(m) % 12) + 12) % 12;
+/** The vocal cut into phrases, in the song's own time, with the evidence chop mode decides on: each phrase's
+ *  first strong onset and where it sits against the song's beat (on it, or a pickup), the song's beat length
+ *  there, how sure the vocal is (voiced share), its melody and rhythm per beat (for the hook) and the
+ *  backing's chroma per beat (for the roots). Each decision has a fallback; no threshold is absolute. */
+async function analyzePhrases(stems, an, progress = () => {}) {
+  const src = an.src, P0 = src.per, v = stems.inEngine ? filt(mono(stems.vocals), "high", 300, 4) : filt(mono(stems.vocals), "high", 120, 2), L = v.length;
+  const HOP = 256, fs = SR / HOP, F = Math.floor(L / HOP), db = new Float32Array(F);
+  for (let f = 0; f < F; f++) db[f] = rmsDb(v, Math.max(0, f * HOP - 512), Math.min(L, f * HOP + 512));
+  // where it sings: within 18 dB of the loudest moment in the surrounding 2 s and 6 dB over the floor;
+  // gaps shorter than a quarter beat are breaths inside a line
+  const floor = Float32Array.from(db).sort()[Math.floor(0.1 * F)], top = minFilter(Float32Array.from(db, x => -x), Math.round(2 * fs));
+  const utt = [];
+  for (let f = 0, s = -1; f <= F; f++) {
+    const on = f < F && db[f] > -top[f] - 18 && db[f] > floor + 6;
+    if (on && s < 0) s = f;
+    if (!on && s >= 0) { const u = utt[utt.length - 1], a = s / fs, b = f / fs; if (u && a - u[1] < Math.max(0.12, 0.25 * P0)) u[1] = b; else utt.push([a, b]); s = -1; }
+  }
+  // phrases: utterances less than 3/4 beat apart, up to 4 bars; a longer line splits at its quietest point
+  const ph = [];
+  for (const [a, b] of utt) {
+    if (b - a < 0.12) continue;
+    const p = ph[ph.length - 1];
+    if (p && a - p.t1 < 0.75 * P0 && b - p.t0 <= 16 * P0) p.t1 = b; else ph.push({ t0: a, t1: b });
+  }
+  for (let i = 0; i < ph.length; i++) {
+    const p = ph[i]; if (p.t1 - p.t0 <= 16 * P0) continue;
+    let bf = Math.round((p.t0 + 4 * P0) * fs); for (let f = bf; f < (p.t1 - 4 * P0) * fs; f++) if (db[f] < db[bf]) bf = f;
+    ph.splice(i + 1, 0, { t0: bf / fs, t1: p.t1 }); p.t1 = bf / fs; i--;
+  }
+  progress(0.2); await tick();
+  const von = onsetTimes(v, 0.05, 0.1), vt = yinTrack(v, SR, 70, 900, 512, 128);
+  const bm = mono(stems.bass), om = mono(stems.other), dm = mono(stems.drums), tonal = Float32Array.from(om, (x, i) => x + 0.6 * bm[i]);
+  const full = Float32Array.from(om, (x, i) => x + bm[i] + dm[i] + v[i]);
+  const notes = noteTimeline(yinTrack(bm, SR), an.tuneCents || 0);
+  progress(0.5); await tick();
+  const beatPos = t => {                                                // fractional index of t on the song's own beats
+    const B = src.beats; if (!src.moving) return (t - src.ph) / P0;
+    if (t <= B[0]) return (t - B[0]) / P0; let lo = 0, hi = B.length - 1; if (t >= B[hi]) return hi + (t - B[hi]) / P0;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (B[m] <= t) lo = m; else hi = m; }
+    return lo + (t - B[lo]) / (B[hi] - B[lo]);
+  };
+  const localP = (a, b) => {                                            // the song's beat length over [a, b)
+    const B = src.moving ? src.beats.filter(t => t >= a && t < b) : []; if (B.length < 4) return P0;
+    let sx = 0, sy = 0, sxx = 0, sxy = 0, n = B.length; B.forEach((t, i) => { sx += i; sy += t; sxx += i * i; sxy += i * t; });
+    return (n * sxy - sx * sy) / (n * sxx - sx * sx);
+  };
+  const all = ph.map((p, i) => {
+    let smax = 0; von.t.forEach((t, k) => { if (t >= p.t0 - 0.06 && t < p.t1) smax = Math.max(smax, von.s[k]); });
+    const k0 = von.t.findIndex((t, k) => t >= p.t0 - 0.06 && t < p.t0 + Math.min(0.3, 0.6 * P0) && von.s[k] >= 0.3 * smax);
+    const on = k0 >= 0 ? von.t[k0] : p.t0, P = localP(on - 2 * P0, p.t1 + 2 * P0);
+    // where the onset sits in the bar, only if the drum onsets around it hold to the beat (beyond 2 standard errors)
+    let W = 0, n = 0; const z = [0, 0, 0, 0];
+    src.on.t.forEach((t, k) => { if (t < on - 4 * P0 || t > p.t1 + 4 * P0) return; const a = 2 * Math.PI * beatPos(t), w = src.on.s[k]; z[0] += w * Math.cos(a); z[1] += w * Math.sin(a); z[2] += w * Math.cos(2 * a); z[3] += w * Math.sin(2 * a); W += w; n++; });
+    const gridR = (Math.hypot(z[0], z[1]) + Math.hypot(z[2], z[3])) / (2 * W || 1), gridOk = n >= 4 && gridR > 2 / Math.sqrt(n);
+    const bp = beatPos(on), q = gridOk ? [0, 0.25, -0.5, -0.25][Math.round(4 * (bp - Math.floor(bp))) % 4] : 0;
+    let nv = 0, na = 0; for (let k = 0; k < vt.t.length; k++) if (vt.t[k] >= p.t0 && vt.t[k] < p.t1) { na++; nv += vt.voiced[k]; }
+    const bar0 = on - q * P, kb = Math.max(1, Math.ceil((p.t1 - bar0) / P - 0.1));
+    return { i, t0: p.t0, t1: p.t1, s0: Math.min(p.t0, on) - 0.03, on, q, P, bar0, kb, gridR, gridOk, vf: na ? nv / na : 0, loud: rmsDb(full, Math.round(on * SR), Math.round(p.t1 * SR)) };
+  });
+  progress(0.6); await tick();
+  // usable: voiced at least half as often as the song's typical phrase, longer than half a beat
+  const vfMed = all.map(p => p.vf).sort((a, b) => a - b)[all.length >> 1] || 0;
+  let list = all.filter(p => p.vf >= 0.5 * vfMed && p.t1 - p.on >= 0.5 * P0), how = "repetition", conf = 0;
+  if (list.length < 2) {                                                // too few phrases: the vocal's loudest 2-bar chops
+    const C = []; for (let t = src.ph; t + 8 * P0 < L / SR; t += 8 * P0) C.push({ t, e: rmsDb(v, Math.round(t * SR), Math.round((t + 8 * P0) * SR)) });
+    list = C.sort((a, b) => b.e - a.e).slice(0, 4).sort((a, b) => a.t - b.t).map((c, k) => ({ i: all.length + k, t0: c.t, t1: c.t + 8 * P0, s0: c.t - 0.03, on: c.t, q: 0, P: P0, bar0: c.t, kb: 8, vf: 1, loud: c.e, gridOk: false, chop: true }));
+    all.push(...list); how = "loop";
+  }
+  // per beat from the bar line: the vocal's melody (chroma) and rhythm (16th energies), the backing's chroma
+  const wins = []; list.forEach(p => { for (let j = 0; j < p.kb; j++) wins.push([p.bar0 + j * p.P, p.bar0 + (j + 1) * p.P]); });
+  const vc = chromaWindows(v, wins, 100, 2000), tc = chromaWindows(tonal, wins);
+  let w0 = 0;
+  for (const p of list) {
+    p.vc = vc.slice(w0, w0 + p.kb); p.tc = tc.slice(w0, w0 + p.kb); w0 += p.kb;
+    p.rh = []; for (let j = 0; j < 4 * p.kb; j++) { const a = Math.round((p.bar0 + j * p.P / 4) * fs), e = Math.round((p.bar0 + (j + 1) * p.P / 4) * fs); let s = 0; for (let f = Math.max(0, a); f < Math.min(F, e); f++) s += Math.pow(10, db[f] / 10); p.rh.push(s / Math.max(1, e - a)); }
+    const m = avg(p.rh), sd = sdev(p.rh) || 1; p.rh = p.rh.map(x => (x - m) / sd);
+    const c = new Array(12).fill(0); p.vc.concat(p.tc).forEach(x => x.forEach((y, k) => c[k] += y));
+    const mx = Math.max(...c); p.set = c.map((y, k) => y >= 0.5 * mx ? k : -1).filter(k => k >= 0); p.key = detectKey(c);
+  }
+  progress(0.8); await tick();
+  // the hook: phrases that repeat (melody + rhythm at the best beat lag, so lines cut at different places still
+  // match), most often, loudest (mix power)
+  const sim = (a, b) => {
+    let best = 0;
+    for (let lag = -b.kb + 1; lag < a.kb; lag++) {
+      let s = 0, r = 0, n = 0;
+      for (let j = Math.max(0, lag); j < Math.min(a.kb, b.kb + lag); j++) { const k = j - lag; s += a.vc[j].reduce((x, y, c) => x + y * b.vc[k][c], 0); n++; for (let u = 0; u < 4; u++) r += a.rh[4 * j + u] * b.rh[4 * k + u]; }
+      if (n >= Math.min(4, a.kb, b.kb)) best = Math.max(best, (0.6 * s / n + 0.4 * Math.max(0, r / (4 * n))) * Math.sqrt(n / Math.max(a.kb, b.kb)));
+    }
+    return best;
+  };
+  const S = list.map(a => list.map(b => a === b ? 0 : sim(a, b))), off = S.flatMap((r, i) => r.filter((_, j) => j !== i));
+  const thr = avg(off) + 1.5 * sdev(off), lmax = Math.max(...list.map(p => p.loud));
+  list.forEach((p, i) => { p.rep = Math.max(0, ...S[i]); p.nrep = S[i].filter(x => x >= thr).length; p.score = (p.rep + 0.25 * Math.min(p.nrep, 4)) * Math.pow(10, (p.loud - lmax) / 10); });
+  const sc = list.map(p => p.score), cut = avg(sc) + 0.5 * sdev(sc);
+  list.forEach(p => p.hook = p.score >= cut);
+  const hs = sc.filter(x => x >= cut), rs = sc.filter(x => x < cut);
+  conf = rs.length ? (avg(hs) - avg(rs)) / (sdev(sc) || 1) : 0;
+  if (how !== "loop" && (conf < 1 || !list.some(p => p.hook && p.nrep > 0))) {   // weak evidence: the loudest repeated phrase and its repeats
+    const rep = list.filter(p => p.nrep > 0), h = (rep.length ? rep : list).reduce((a, b) => b.loud > a.loud ? b : a);
+    const hi = list.indexOf(h); list.forEach((p, i) => p.hook = p === h || S[hi][i] >= thr);
+    how = rep.length ? "loudest repeated" : "loudest";
+  }
+  if (how === "loop") list.forEach(p => p.hook = true);
+  // hook runs (consecutive hook phrases): the first drop takes the strongest (mean score); later drops take
+  // runs that repeat it with at least half its material, strongest first, else the strongest again
+  let hookRuns = []; list.forEach((p, i) => { if (!p.hook) return; const r = hookRuns[hookRuns.length - 1]; if (r && list[i - 1] === r[r.length - 1]) r.push(p); else hookRuns.push([p]); });
+  const dur = r => r.reduce((s, p) => s + p.t1 - p.on, 0), rs_ = r => avg(r.map(p => p.score));
+  if (hookRuns.length) {
+    const top = hookRuns.reduce((a, b) => rs_(b) > rs_(a) ? b : a), ti = top.map(p => list.indexOf(p));
+    hookRuns = [top, ...hookRuns.filter(r => r !== top && dur(r) >= 0.5 * dur(top) && r.some(p => ti.some(i => S[i][list.indexOf(p)] >= thr))).sort((a, b) => rs_(b) - rs_(a))];
+  }
+  log(`  phrases: ${all.length} found, ${list.length} usable (voiced share >= ${(0.5 * vfMed).toFixed(2)}); hook by ${how} (evidence ${conf.toFixed(1)} SD): ${hookRuns.map(r => r.map(p => p.on.toFixed(1)).join("+")).join(", ")} s`);
+  progress(1);
+  return { all, list, hookRuns: hookRuns.map(r => r.map(p => p.i)), hook: { how, conf }, notes, P0 };
+}
+/** The bass root for the source span [a, b) of a phrase: the song's bass note sounding longest there (>= 35% of
+ *  the span), else the backing's triad root, else the tonic of the phrase's best-fit key; a root outside the
+ *  phrase's own pitch set (chroma >= half its peak) is not taken. */
+function rootAt(p, notes, a, b) {
+  a = Math.max(a, p.bar0); b = Math.min(b, p.t1); if (b - a < 0.25 * p.P) { a = p.bar0; b = p.t1; }
+  const cov = new Float64Array(12);
+  for (const n of notes) { if (n.e <= a) continue; if (n.s >= b) break; cov[pcOf(n.m)] += Math.min(n.e, b) - Math.max(n.s, a); }
+  let pc = 0; for (let k = 1; k < 12; k++) if (cov[k] > cov[pc]) pc = k;
+  if (cov[pc] >= 0.35 * (b - a) && p.set.includes(pc)) return { pc, how: "bass", conf: cov[pc] / (b - a) };
+  const c = new Array(12).fill(0);
+  for (let j = Math.max(0, Math.floor((a - p.bar0) / p.P)); j < Math.min(p.kb, Math.ceil((b - p.bar0) / p.P)); j++) p.tc[j].forEach((v, k) => c[k] += v);
+  const t = triadRoot(c);
+  if (c.some(v => v > 0) && p.set.includes(t.root)) return { pc: t.root, how: "chord", conf: t.s / (Math.hypot(...c) || 1) };
+  return { pc: p.key.tonic, how: "key", conf: p.key.r };
 }
 
 /* ------------------------------------------------------------ arrangement */
@@ -589,12 +743,12 @@ function shuffleArrangement(an, seed = 1) {
   add("outro", Math.max(0, lastV - 1), 2);
   return S.map(x => `${x.kind}:${x.src}:${x.n}`).join(", ");
 }
-/** "intro:0:8, drop:16:16, ..." -> sections; kind:src:bars, name auto. */
+/** "intro:0:8, drop:16:16, ..." (kind:src:bars) or "intro:8, drop:16, ..." (chop mode: kind:bars) -> sections. */
 function parseArrangement(txt) {
   const S = []; const count = {};
   for (const part of txt.split(/[,\n]+/).map(s => s.trim()).filter(Boolean)) {
-    const [kind, src, n] = part.split(":"); count[kind] = (count[kind] || 0) + 1;
-    S.push({ name: kind + count[kind], kind, src: +src, n: +n });
+    const f = part.split(":"), kind = f[0]; count[kind] = (count[kind] || 0) + 1;
+    S.push({ name: kind + count[kind], kind, src: f.length > 2 ? +f[1] : 0, n: +f[f.length - 1] });
   }
   return S;
 }
@@ -661,7 +815,9 @@ function kickSettle(y) {
 
 /* ------------------------------------------------------------ defaults */
 const DEFAULTS = {
-  semis: 4,                 // speed the song up: +4 st = 140 -> 176 BPM (v10 B)
+  mode: "chop",             // "chop": the vocal's phrases on a fixed groove | "continuous": the whole song sped up under new drums
+  bpm: 175,                 // chop mode's tempo
+  semis: 4,                 // pitch up (chop) / speed up (continuous: +4 st = 140 -> 176 BPM, v10 B)
   pattern: "alt",           // drops: four on the floor, then x x xxx (2-bar cycle)
   h16: true,                // 16th hats in the drops
   tailLp: 900, buzz: 0.05,  // kick tone: tail low-pass, how much buzz survives the attack
@@ -788,16 +944,7 @@ async function stageArrange(an, sp, o, sections, teaserSrc, cache, progress) {
   shape.forEach((p, obi) => { if (p.riser) sweeps.push([Math.round(ot(obi) * SR), Math.round(ot(obi + 1) * SR), 30, 800, 1.5, "hp"]); });
   if (N_BARS > 4) sweeps.push([Math.round(ot(N_BARS - 4) * SR), Math.round(ot(N_BARS) * SR), 18000, 300, 0.8, "lp"]);
   for (const [a, e, f0, f1, pw, kind] of sweeps) for (const c of bass808) svf(c, a, e, i => f0 * Math.pow(f1 / f0, Math.pow((i - a) / (e - a), pw)), kind);
-  // vocals: high-pass + light compression; vocal activity keys the bed's 1-4 kHz dip
-  const lift = Math.pow(10, 4.5 / 20) - 1;
-  const voxComp = vox.map(c => compress(filt(c, "high", 90, 2), -20, 2.5, 5, 80));
-  const act = (() => {
-    const m = mono(voxComp); for (let i = 0; i < m.length; i++) m[i] *= 1 + dropM[i] * lift;
-    const p = band(m, 900, 4200), e = smooth(Float32Array.from(p, Math.abs), Math.round(0.04 * SR));
-    const nz = Float32Array.from(e.filter(v => v > 1e-4)).sort(), ref = nz.length ? nz[Math.floor(nz.length * 0.7)] : 1;
-    return smooth(Float32Array.from(e, v => Math.min(1, v / (ref + 1e-9))), Math.round(0.06 * SR));
-  })();
-  const bedPres = bedPre.map(c => band(c, 900, 4200));
+  const { voxComp, act } = vocalBus(vox, dropM), bedPres = bedPre.map(c => band(c, 900, 4200));
   progress(0.75); await tick();
   const v = { key, blocks, barInfo, N, N_BARS, BEAT, BAR, OB0, ot, out808, drumM, dropM, bedPre, bedPres, bass808, voxComp, act, sweeps };
   cache.arrange.set(key, v);
@@ -805,11 +952,183 @@ async function stageArrange(an, sp, o, sections, teaserSrc, cache, progress) {
   return v;
 }
 
-/** Splice + arrangement + all buses. Returns layers and everything the UI needs.
- *  `cache` (kept by the caller) makes speed and groove changes cheap: a groove
- *  change only redoes the drums; a speed seen before skips the speed-up. */
+/** Vocals: high-pass + light compression; their 1-4 kHz activity keys the bed's and the kick's presence dip. */
+function vocalBus(vox, dropM) {
+  const lift = Math.pow(10, 4.5 / 20) - 1;
+  const voxComp = vox.map(c => compress(filt(c, "high", 90, 2), -20, 2.5, 5, 80));
+  const m = mono(voxComp); for (let i = 0; i < m.length; i++) m[i] *= 1 + dropM[i] * lift;
+  const p = band(m, 900, 4200), e = smooth(Float32Array.from(p, Math.abs), Math.round(0.04 * SR));
+  const nz = Float32Array.from(e.filter(v => v > 1e-4)).sort(), ref = nz.length ? nz[Math.floor(nz.length * 0.7)] : 1;
+  return { voxComp, act: smooth(Float32Array.from(e, v => Math.min(1, v / (ref + 1e-9))), Math.round(0.06 * SR)) };
+}
+
+/** Build the remix: chop mode (default) or the continuous mode that keeps the whole song running. */
 async function build(stems, samples, an, opts = {}, progress = () => {}, cache = {}) {
   const o = { ...DEFAULTS, ...opts };
+  return o.mode === "continuous" ? buildContinuous(an.stemsW || stems, samples, an, o, progress, cache) : buildChop(stems, samples, an, o, progress, cache);
+}
+
+/* ------------------------------------------------------------ chop mode: build */
+const K4 = "x...x...x...x...", OFF = "..x...x...x...x.", BB = "....x.......x...", S8 = "x.x.x.x.x.x.x.x.", S16 = "xxxxxxxxxxxxxxxx";
+/** Section templates: bar ranges (negative = counted from the section's end) with one 16-step pattern per lane.
+ *  Drops: tonal kick on every beat, off-beat bass, clap on 2 and 4, off-beat hat; 16th hats join after 8 bars.
+ *  Builds: backbeat, then a snare roll that doubles, kick in 8ths, a bar of roll alone. Breaks have no kick.
+ *  Fill bars may change elements off the 8-bar lines. */
+const TEMPLATES = {
+  intro: [[0, 8, { kick: K4, hat: OFF }]],
+  build: [[0, 4, { kick: K4, hat: OFF, snare: BB }], [4, -2, { kick: K4, hat: OFF, roll: S8, fill: 1 }], [-2, -1, { kick: S8, hat: OFF, roll: S16, fill: 1 }], [-1, 0, { roll: S16, fill: 1 }]],
+  drop: [[0, 8, { kick: K4, bass: OFF, snare: BB, hat: OFF }], [8, 16, { kick: K4, bass: OFF, snare: BB, hat: OFF, h16: 1 }]],
+  break: [[0, -1, {}], [-1, 0, { roll: "............xxxx", fill: 1 }]],
+  outro: [[0, 8, { kick: K4, hat: OFF }]],
+};
+const FORM = { full: "intro:8, build:8, drop:16, break:8, build:8, drop:16, outro:8", short: "intro:8, build:8, drop:16, outro:8" };
+
+/** Chop mode: a fixed-tempo groove from the templates, with the song's vocal phrases cut out, each
+ *  stretched (pitch kept) by its own tempo onto whole beats and started on a bar line. The song's drums and
+ *  bass are not used; its backing plays (high-passed, ducked) in breaks and builds only. */
+async function buildChop(stems, samples, an, o, progress, cache) {
+  const ph = cache.phrases || (cache.phrases = await analyzePhrases(stems, an, p => progress(0.4 * p)));
+  const T = 60 / o.bpm, BEAT = T, BAR = 4 * T, R = Math.pow(2, o.semis / 12), OB0 = 0.05;
+  // one beat of the song becomes m beats of the remix (m = 1/2, 1, 2: whichever needs the least stretch)
+  const Pm = ph.list.map(p => p.P).sort((a, b) => a - b)[ph.list.length >> 1] || ph.P0;
+  const m = [0.5, 2].reduce((b, x) => Math.abs(Math.log(x * T * R / Pm)) < Math.abs(Math.log(b * T * R / Pm)) ? x : b, 1);
+  const use = ph.list.map(p => ({ ...p, alpha: m * T * R / p.P })).filter(p => Math.abs(Math.log(p.alpha)) <= Math.log(1.42));
+  const out = (p, t) => (t - p.bar0) * p.alpha / R;                    // source time -> remix seconds after the phrase's bar line
+  for (const p of use) p.bars = Math.max(1, Math.ceil((out(p, p.t1) - 0.25 * BEAT) / BAR));
+  const byId = new Map(use.map(p => [p.i, p])), verse = use.filter(p => !p.hook);
+  const runs = ph.hookRuns.map(r => r.map(i => byId.get(i)).filter(Boolean)).filter(r => r.length);
+  if (!runs.length && use.length) runs.push([use.reduce((a, b) => b.loud > a.loud ? b : a)]);
+  const sections = parseArrangement(o.arrangement || (verse.length >= 2 && use.length >= 4 ? FORM.full : FORM.short));
+  let ob = 0; const blocks = sections.map(s => { const b = { ...s, src: 0, out: ob }; ob += s.n; return b; });
+  const N_BARS = ob, N = Math.round((OB0 + N_BARS * BAR + 3) * SR), ot = (bar, b = 0) => OB0 + bar * BAR + b * BEAT;
+  const barInfo = []; for (const b of blocks) for (let i = 0; i < b.n; i++) barInfo.push({ block: b.name, kind: b.kind, idx: i, n: b.n });
+  // phrases onto bar lines, whole, in the song's order: drops loop their hook run, other sections take the
+  // next verse phrases; a pickup may reach back into the previous bar when nothing sounds there
+  const placed = []; let vi = 0, di = 0, lastEnd = -Infinity;
+  const tryPut = (p, bar, end, b) => {
+    let at = bar; while (at < end && ot(at) + out(p, p.s0) < lastEnd - 0.05) at++;
+    if (at + p.bars > end) return -1;
+    placed.push({ p, bar: at, block: b }); lastEnd = ot(at) + out(p, p.t1); return at + p.bars;
+  };
+  for (const b of blocks) {
+    const end = b.out + b.n - (b.kind === "build" ? 2 : 0);               // a build's last 2 bars: the hook stutter
+    let bar = b.out;
+    if (b.kind === "drop") {
+      const run = runs[Math.min(di++, runs.length - 1)] || [];
+      for (let k = 0, miss = 0; run.length && bar < end && miss < run.length; k++) { const nx = tryPut(run[k % run.length], bar, end, b); if (nx < 0) miss++; else { bar = nx; miss = 0; } }
+    } else for (let n = 0; n < verse.length && bar < end; n++) {
+      const p = verse[vi % verse.length], nx = tryPut(p, bar, end, b);
+      if (nx >= 0) { bar = nx; vi++; } else if (p.bars > end - b.out) vi++; else break;
+    }
+  }
+  progress(0.5); await tick();
+  // the bass root of every bar, from the source span its phrase plays there (sounding pitch: + the shift)
+  const roots = new Array(N_BARS).fill(null);
+  for (const pl of placed) for (let k = 0; k < pl.p.bars; k++) {
+    const p = pl.p, a = p.bar0 + k * BAR * R / p.alpha, r = rootAt(p, ph.notes, a, a + BAR * R / p.alpha);
+    roots[pl.bar + k] = { ...r, pc: (r.pc + o.semis) % 12, src: [a, a + BAR * R / p.alpha], phrase: p.i };
+  }
+  blocks.forEach((b, i) => { const nx = blocks[i + 1]; if (b.kind === "build" && nx && roots[nx.out]) for (let k = b.out + b.n - 2; k < b.out + b.n; k++) roots[k] = roots[k] || { ...roots[nx.out], how: "next drop" }; });
+  const keyPc = (an.key.tonic + o.semis) % 12;
+  for (let k = 0, last = roots.find(Boolean) || { pc: keyPc, how: "song key" }; k < N_BARS; k++) roots[k] = roots[k] ? (last = roots[k]) : { ...last, carried: true };
+
+  const ck = `${o.semis}|${o.bpm}|${blocks.map(b => b.kind + b.n).join(",")}`;
+  if (!cache.chop || cache.chop.key !== ck) cache.chop = { key: ck, ...(await renderChops(stems, ph, placed, blocks, { T, BAR, R, m, N, ot, out }, o, progress)) };
+  const { vox, bed, leak } = cache.chop;
+
+  // the groove: the templates as a score; kick and bass play each bar's root
+  const score = { kick: [], bass: [], snare: [], hat: [], bell: [] }, plan = [];
+  const TEKK = "x...x...x.x.x...", FILL = "x...x...x.x.x.x.";
+  for (const b of blocks) {
+    const rows = (TEMPLATES[b.kind] || []).map(([a, e, pat]) => [a < 0 ? b.n + a : a, e <= 0 ? b.n + e : e, pat]);
+    const r0 = Math.min(b.n, ...rows.filter(r => r[2].roll).map(r => r[0]));
+    for (let i = 0; i < b.n; i++) {
+      const bar = b.out + i, pc = roots[bar].pc, lane = {};
+      for (const [a, e, pat] of rows) if (i >= a && i < e) Object.assign(lane, pat);
+      if (b.kind === "drop" && lane.kick) {
+        if (o.pattern === "tekk" || (o.pattern === "alt" && i % 2)) lane.kick = TEKK;
+        if (i % 8 === 7 && i + 1 < b.n) { lane.kick = FILL; lane.fill = 1; }
+      }
+      const x = (k, s) => !!lane[k] && lane[k][s] === "x";
+      for (let s = 0; s < 16; s++) {
+        const st = bar * 16 + s;
+        if (x("kick", s)) score.kick.push({ s: st, pc });
+        if (x("bass", s) && !x("kick", s)) score.bass.push({ s: st, pc });
+        if (x("snare", s)) score.snare.push({ s: st, g: 0.22 });
+        if (x("roll", s)) score.snare.push({ s: st, g: 0.06 + 0.24 * Math.pow(((i - r0) * 16 + s) / ((b.n - r0) * 16), 1.5) });
+        if (x("hat", s)) score.hat.push({ s: st, g: 0.34 });
+        if (lane.h16 && o.h16 && s % 2) score.hat.push({ s: st, g: 0.13 });
+      }
+      const lp = b.kind === "intro" ? 200 * Math.pow(2, 0.6 * i) : b.kind === "outro" && i >= b.n - 4 ? 3000 * Math.pow(2, -0.8 * (i - b.n + 5)) : null;
+      plan.push({ lp, fill: !!lane.fill, kind: b.kind });
+    }
+  }
+  for (const b of blocks.filter((b, i) => b.kind === "drop" && i > 0 && blocks[i - 1].kind !== "drop")) for (const s of [4, 12]) score.bell.push({ s: (b.out - 2) * 16 + s, g: 0.5, semis: 0 });
+  const mask = pred => { const mk = zeros(N); barInfo.forEach((bi, k) => { if (pred(bi, k)) mk.fill(1, Math.round((ot(k) - 0.005) * SR), Math.min(N, Math.round((ot(k + 1) - 0.005) * SR))); }); return smooth(mk, Math.round(0.012 * SR)); };
+  const kickBars = new Set(score.kick.map(e => Math.floor(e.s / 16)));
+  const drumM = mask((_, k) => kickBars.has(k)), dropM = mask(bi => bi.kind === "drop");
+  const sweeps = blocks.filter(b => b.kind === "build").map(b => [Math.round(ot(b.out + b.n - 2) * SR), Math.round(ot(b.out + b.n) * SR), 30, 800, 1.5, "hp"]);
+  const { voxComp, act } = vocalBus(vox, dropM);
+  const A = { blocks, barInfo, N, N_BARS, BEAT, BAR, OB0, ot, drumM, dropM, bedPre: bed, bedPres: bed.map(c => band(c, 900, 4200)), voxComp, act, sweeps };
+  const chop = { bpm: o.bpm, semis: o.semis, m, hook: ph.hook, leak, inEngine: !!stems.inEngine,
+    phrases: ph.all.map(p => ({ i: p.i, t0: p.t0, t1: p.t1, on: p.on, q: p.q, P: p.P, vf: p.vf, gridOk: p.gridOk, used: byId.has(p.i), hook: !!byId.get(p.i)?.hook, alpha: byId.get(p.i)?.alpha, rep: p.rep, nrep: p.nrep, loud: p.loud, score: p.score })),
+    placed: placed.map(pl => ({ i: pl.p.i, bar: pl.bar, bars: pl.p.bars, kind: pl.block.kind, alpha: pl.p.alpha, bar0: pl.p.bar0, on: pl.p.on, s0: pl.p.s0, t1: pl.p.t1, q: pl.p.q, hook: pl.p.hook })),
+    roots: roots.map(r => ({ pc: r.pc, how: r.how, src: r.src, phrase: r.phrase, carried: !!r.carried })) };
+  log(`  chop: ${o.bpm} BPM, 1 song beat = ${m} beat(s), stretch ${use.length ? use.map(p => p.alpha).sort((a, b) => a - b).filter((_, k, a) => k === 0 || k === a.length - 1).map(v => v.toFixed(2)).join("-") : "-"}, ${placed.length} phrases placed; ` + blocks.map(b => `${b.name}:${b.n}`).join(" "));
+  const ctx = { mode: "chop", tuneCents: an.tuneCents || 0, A, plan, scales: [], key: `${NAMES[keyPc]} ${an.key.mode}`, scale: [], arrangement: blocks.map(b => `${b.kind}:${b.n}`).join(", "), o, chop };
+  progress(0.9); await tick();
+  const r = mixScore(ctx, score, samples, o);
+  progress(1);
+  return r;
+}
+
+/** The vocal (and, in breaks and builds, the backing) of every placed phrase: varispeed by the pitch shift,
+ *  stretch to its beats with its onsets locked, start on its bar line. The backing, and the vocal when the
+ *  engine separated it, are high-passed at 300 Hz: that is where the song's kick and 808 leak through the
+ *  in-engine separator (3-6x less leak for 2-12 points of the vocal's energy on the test songs). A build's
+ *  last two bars stutter the first syllable of the hook that follows. */
+async function renderChops(stems, ph, placed, blocks, g, o, progress) {
+  const { T, BAR, R, m, N, ot, out } = g, vox = st2(N), bed = st2(N);
+  const leak = stems.probe ? { vox: [0, 0], db: [0, 0], v: [0, 0], bed: 0, bedDb: 0 } : null;
+  const E = y => { let s = 0; for (const c of y) for (let i = 0; i < c.length; i++) s += c[i] * c[i]; return s; };
+  const hp = (y, on = true) => on ? y.map(c => filt(c, "high", 300, 4)) : y;
+  const seg = (x, a, e) => fadeOut(fadeIn(slice2(x, a, e), 0.005), 0.04);
+  const next = new Map(ph.all.map((p, k) => [p.i, ph.all.slice(k + 1).find(q => q.s0 > p.on)?.s0 ?? Infinity]));
+  for (const [k, pl] of placed.entries()) {
+    const p = pl.p, a = Math.max(0, Math.round(p.s0 * SR)), e = Math.min(stems.vocals[0].length, Math.round(Math.min(p.t1 + 0.12, next.get(p.i)) * SR));
+    if (e - a < 256) continue;
+    const y = repitch2(hp(seg(stems.vocals, a, e), stems.inEngine), o.semis), on = onsetTimes(mono(y), 0.08, 0.3);
+    const locks = on.t.map((t, j) => [t, on.s[j]]).sort((u, w) => w[1] - u[1]).map(([t]) => Math.round(t * SR));
+    place(vox, stretch(y, p.alpha, locks), ot(pl.bar) + out(p, p.s0));
+    if (leak) for (const [n, x] of [["vox", stems.vocals], ["db", stems.probe.db.vocals], ["v", stems.probe.v.vocals]]) { const s_ = seg(x, a, e); leak[n][0] += E(s_); leak[n][1] += E(hp(s_)); }
+    if (["break", "build"].includes(pl.block.kind)) {                    // the backing under this phrase's bars
+      const b0 = Math.round(p.bar0 * SR), b1 = Math.min(stems.other[0].length, Math.round((p.bar0 + pl.p.bars * BAR * R / p.alpha) * SR));
+      if (b1 - Math.max(0, b0) > 256) {
+        const raw = hp(fadeOut(fadeIn(slice2(stems.other, Math.max(0, b0), b1), 0.01), 0.01));
+        place(bed, stretch(repitch2(raw, o.semis), p.alpha), ot(pl.bar) + Math.max(0, -b0) / SR * p.alpha / R);
+        if (leak) { leak.bed += E(raw); leak.bedDb += E(hp(slice2(stems.probe.db.other, Math.max(0, b0), b1))); }
+      }
+    }
+    if (k % 4 === 0) { progress(0.5 + 0.35 * k / placed.length); await tick(); }
+  }
+  // the hook stutter: its first 8th, in 8ths then 16ths, up to the drop's pickup
+  blocks.forEach((b, i) => {
+    if (b.kind !== "build") return;
+    const first = placed.find(pl => pl.block === blocks[i + 1]), p = first ? first.p : placed.find(pl => pl.p.hook)?.p;
+    if (!p) return;
+    const a = Math.round(p.on * SR), e = Math.round((p.on + p.P / (2 * m)) * SR);
+    const chop = stretch(repitch2(slice2(stems.vocals, a, e), o.semis), p.alpha), stop = first ? ot(first.bar) + out(p, p.s0) - 0.01 : Infinity;
+    for (let s = 0; s < 24; s++) {
+      const bar = b.out + b.n - 2 + (s < 8 ? 0 : 1), q = s < 8 ? s / 2 : (s - 8) / 4, len = s < 8 ? T / 2 : T / 4, t = ot(bar, q);
+      const n = Math.round(Math.min(len, stop - t) * SR); if (n < 64) break;
+      place(vox, fadeOut(fadeIn(slice2(chop, 0, n), 0.002), 0.008), t, 0.5 + 0.35 * s / 23);
+    }
+  });
+  return { vox, bed, leak };
+}
+
+/** Continuous mode: the whole song sped up on its own (detected) beat grid, the new drums on top. */
+async function buildContinuous(stems, samples, an, o, progress, cache) {
   const keyTonic = (an.key.tonic + o.semis) % 12;
   const SCALE = (an.key.mode === "minor" ? [0, 2, 3, 5, 7, 8, 10] : [0, 2, 4, 5, 7, 9, 11]).map(i => (keyTonic + i) % 12);
   const inScale = pc => SCALE.includes(((pc % 12) + 12) % 12);
@@ -906,8 +1225,10 @@ function mixScore(ctx, score, samples, opts) {
   const o = { ...DEFAULTS, ...opts }, A = ctx.A, { N, N_BARS, BEAT, BAR, OB0, barInfo, blocks, drumM, dropM } = A;
   const STEP = BEAT / 4, t = s => OB0 + s * STEP, barOf = s => Math.min(barInfo.length - 1, Math.max(0, Math.floor(s / 16)));
   const clean = (arr) => arr.filter(e => e.s >= 0 && e.s < N_BARS * 16).sort((a, b) => a.s - b.s);
-  score = { kick: clean(score.kick), snare: clean(score.snare), hat: clean(score.hat), bell: clean(score.bell) };
+  score = { kick: clean(score.kick), bass: clean(score.bass || []), snare: clean(score.snare), hat: clean(score.hat), bell: clean(score.bell) };
   const hits = score.kick.map(e => { const bar = barOf(e.s), bi = barInfo[bar]; return { t: t(e.s), s: e.s, pc: ((e.pc % 12) + 12) % 12, scale: ctx.scales[bar], lp: ctx.plan[bar].lp, long: bi.kind === "drop", kind: bi.kind, bar }; });
+  const bassT = score.bass.map(e => t(e.s));                           // a kick ends where the next kick or bass note starts
+  hits.forEach((h, j) => { h.end = Math.min(j + 1 < hits.length ? hits[j + 1].t : h.t + 1, bassT.find(x => x > h.t + 1e-4) ?? Infinity); });
   const layers = { perc: st2(N), fx: st2(N) };
   const snare = samples._snareF || (samples._snareF = filt2(samples.snare, "high", 200)), hat = samples.hat;
   for (const e of score.snare) place(layers.perc, snare, t(e.s), e.g ?? 0.22);
@@ -924,12 +1245,16 @@ function mixScore(ctx, score, samples, opts) {
   const bed = A.bedPre.map((c, ci) => { const p = A.bedPres[ci], y = zeros(N); for (let i = 0; i < N; i++) y[i] = (c[i] - p[i] * 0.55 * act[i]) * (1 - drumM[i] * (1 - dk25[i])); return y; });
   for (const [a, e, f0, f1, pw, kind] of A.sweeps) for (const c of bed) svf(c, a, e, i => f0 * Math.pow(f1 / f0, Math.pow((i - a) / (e - a), pw)), kind);
   const vox = A.voxComp.map(c => { const y = zeros(N); for (let i = 0; i < N; i++) y[i] = c[i] * (1 - drumM[i] * (1 - dk12[i])) * (1 + dropM[i] * lift) * 1.15; return y; });
-  const meta = { tuneCents: ctx.tuneCents, blocks, barInfo, plan: ctx.plan, hits, OB0, BEAT, BAR, N, N_BARS, bpm: 60 / BEAT, key: ctx.key, scale: ctx.scale, arrangement: ctx.arrangement, score };
-  const dk = `${o.bassLo}|${o.bassHi}`;
-  if (o.bassVoice === "dark" && A.bassDarkKey !== dk) { A.bassDark = darkSub(A, o.bassLo, o.bassHi, ctx.tuneCents || 0); A.bassDarkKey = dk; }
-  const bassSrc = o.bassVoice === "dark" ? A.bassDark : A.bass808;
-  const dkB = duck(N, kickTimes, 0.9, 0.08);                             // one low sound at a time: the bass gets out of the kick's way
-  const bass808 = bassSrc.map(c => Float32Array.from(c, (v, i) => v * (1 - (1 - dropM[i]) * (1 - dkB[i]))));
+  const meta = { tuneCents: ctx.tuneCents, blocks, barInfo, plan: ctx.plan, hits, OB0, BEAT, BAR, N, N_BARS, bpm: 60 / BEAT, key: ctx.key, scale: ctx.scale, arrangement: ctx.arrangement, score, mode: ctx.mode, chop: ctx.chop };
+  let bass808 = st2(N);
+  if (ctx.mode !== "chop") {                                            // the song's 808, or a dark sub playing its line
+    const dk = `${o.bassLo}|${o.bassHi}`;
+    if (o.bassVoice === "dark" && A.bassDarkKey !== dk) { A.bassDark = darkSub(A, o.bassLo, o.bassHi, ctx.tuneCents || 0); A.bassDarkKey = dk; }
+    const bassSrc = o.bassVoice === "dark" ? A.bassDark : A.bass808;
+    const dkB = duck(N, kickTimes, 0.9, 0.08);                           // one low sound at a time: the bass gets out of the kick's way
+    bass808 = bassSrc.map(c => Float32Array.from(c, (v, i) => v * (1 - (1 - dropM[i]) * (1 - dkB[i]))));
+  }
+  if (score.bass.length) { const b = renderBass(score.bass, meta, o); for (let c = 0; c < 2; c++) for (let i = 0; i < N; i++) bass808[c][i] += b[c][i]; }
   const L = { bed, bass808, vocals: vox, perc: layers.perc, fx: layers.fx };
   L.kick = renderKick(samples, meta, o, act);
   score.kick.forEach((e, i) => { e.hz = hits[i].hz; });                // the frequency actually played, for MIDI
@@ -1100,7 +1425,7 @@ function renderKick(samples, meta, opts, act = null) {
   };
   const bus = st2(N), hits = meta.hits;
   hits.forEach((h, j) => {
-    const gap = j + 1 < hits.length ? hits[j + 1].t - h.t : 1;
+    const gap = (h.end ?? (j + 1 < hits.length ? hits[j + 1].t : h.t + 1)) - h.t;
     h.hz = noteHz(h.pc) * Math.pow(2, o.kickTune / 12);
     const k = kickFor(h.pc, h.long);
     let y = slice2(k, 0, Math.round(Math.min(gap - 0.004, k[0].length / SR) * SR));
@@ -1113,6 +1438,28 @@ function renderKick(samples, meta, opts, act = null) {
   const d1 = meta.blocks.find(b => b.kind === "drop");
   if (d1) { const a = Math.round((meta.OB0 + d1.out * meta.BAR) * SR), e = Math.round((meta.OB0 + (d1.out + d1.n) * meta.BAR) * SR); const g = Math.pow(10, (-10.5 - rmsDb(mono(bus), a, e)) / 20); for (const c of bus) for (let i = 0; i < N; i++) c[i] *= g; }
   return bus;
+}
+
+/** The score's bass lane: a driven two-saw stab per note an octave over the kick's tail, cut before the next
+ *  kick or bass note, so kick and bass never sound together. Level: -12 dB RMS over the first drop. */
+function renderBass(events, meta, o) {
+  const { N, OB0, BEAT } = meta, bus = zeros(N), kicks = meta.hits.map(h => h.t), times = events.map(e => OB0 + e.s * BEAT / 4);
+  events.forEach((e, j) => {
+    const t0 = times[j], end = Math.min(kicks.find(x => x > t0 + 1e-4) ?? Infinity, times[j + 1] ?? Infinity, t0 + 2 * BEAT);
+    const n = Math.round((end - t0 - 0.004) * SR), i0 = Math.round(t0 * SR);
+    let hz = 32.703 * Math.pow(2, pcOf(e.pc) / 12 + (meta.tuneCents || 0) / 1200 + o.kickTune / 12);
+    while (hz >= 2 * o.bassHi) hz /= 2; while (hz < 2 * o.bassLo) hz *= 2;
+    let a = 0, b = 0.37, ph = 0;
+    for (let i = 0; i < n && i0 + i < N; i++) {
+      a = (a + hz * 1.004 / SR) % 1; b = (b + hz / 1.004 / SR) % 1; ph += 2 * Math.PI * hz / SR;
+      const env = Math.min(1, i / (0.002 * SR)) * (1 - 0.35 * i / n) * Math.min(1, (n - i) / (0.005 * SR));
+      bus[i0 + i] += Math.tanh(2.2 * (0.35 * (2 * a - 1) + 0.35 * (2 * b - 1) + 0.6 * Math.sin(ph))) * env;
+    }
+  });
+  const y = filt(filt(bus, "low", 1400, 2), "high", 35, 2), d1 = meta.blocks.find(b => b.kind === "drop");
+  const g = d1 ? Math.pow(10, (-12 - rmsDb(y, Math.round((OB0 + d1.out * meta.BAR) * SR), Math.round((OB0 + (d1.out + d1.n) * meta.BAR) * SR))) / 20) : 0.3;
+  for (let i = 0; i < N; i++) y[i] *= g;
+  return [y, Float32Array.from(y)];
 }
 
 /* ------------------------------------------------------------ mix helpers */
@@ -1245,7 +1592,7 @@ async function master(layers, meta, masks, mixOpts = {}, progress = () => {}) {
 }
 
 /* ------------------------------------------------------------ MIDI */
-/** Standard MIDI file of the drum score: kick (tuned notes, ch 1), snare 38 + hats 42 (ch 10), bell (ch 2, from E4).
+/** Standard MIDI file of the drum score: kick (tuned notes, ch 1), bass (ch 3, octave 2), snare 38 + hats 42 (ch 10), bell (ch 2, from E4).
  *  Bar 1 starts at tick 0; 480 ticks per beat, 120 per 16th step. */
 function encodeMidi(meta) {
   const PPQ = 480, ST = PPQ / 4, sc = meta.score;
@@ -1263,6 +1610,7 @@ function encodeMidi(meta) {
   const tracks = [[...str("MTrk"), 0, 0, 0, t0.length, ...t0]];
   const vel = (g, ref) => Math.max(1, Math.min(127, Math.round(g / ref * 110)));
   tracks.push(track("kick", sc.kick.map((e, i) => { const nx = i + 1 < sc.kick.length ? sc.kick[i + 1].s : e.s + 4; return [e.s * ST, Math.min(nx, e.s + 4) * ST, 0, Math.round(hzToMidi(e.hz || 32.703 * Math.pow(2, e.pc / 12))), 110]; })));
+  tracks.push(track("bass", (sc.bass || []).map((e, i, a) => [e.s * ST, Math.min(a[i + 1] ? a[i + 1].s : e.s + 2, e.s + 2) * ST, 2, 36 + pcOf(e.pc), 110])));
   tracks.push(track("snare", sc.snare.map(e => [e.s * ST, e.s * ST + ST, 9, 38, vel(e.g ?? 0.22, 0.25)])));
   tracks.push(track("hats", sc.hat.map(e => [e.s * ST, e.s * ST + ST, 9, 42, vel(e.g ?? 0.34, 0.34)])));
   tracks.push(track("bell", sc.bell.map(e => [e.s * ST, e.s * ST + 4 * ST, 1, 64 + (e.semis ?? 0), vel(e.g ?? 0.5, 0.5)])));
@@ -1272,7 +1620,7 @@ function encodeMidi(meta) {
 /** Read a MIDI file back into a score (as written by encodeMidi, or edited in a DAW at the same tempo). */
 function decodeMidi(buf) {
   const b = new Uint8Array(buf), u32 = i => (b[i] << 24 | b[i + 1] << 16 | b[i + 2] << 8 | b[i + 3]) >>> 0;
-  const ppq = (b[12] << 8) | b[13], ST = ppq / 4, score = { kick: [], snare: [], hat: [], bell: [] };
+  const ppq = (b[12] << 8) | b[13], ST = ppq / 4, score = { kick: [], bass: [], snare: [], hat: [], bell: [] };
   let p = 14;
   while (p + 8 <= b.length) {
     const len = u32(p + 4), end = p + 8 + len; let q = p + 8, t = 0, run = 0, name = "";
@@ -1285,6 +1633,7 @@ function decodeMidi(buf) {
       if (hi !== 0x90 || d2 === 0) continue;
       const s = Math.round(t / ST), g = d2 / 110;
       if (ch === 9 || /snare|hat|drum/.test(name)) { if (d1 === 38 || d1 === 40) score.snare.push({ s, g: g * 0.25 }); else if (d1 === 42 || d1 === 44 || d1 === 46) score.hat.push({ s, g: g * 0.34 }); else if (d1 === 36 || d1 === 35) score.kick.push({ s, pc: 2 }); }
+      else if (/bass/.test(name) || ch === 2) score.bass.push({ s, pc: ((d1 % 12) + 12) % 12 });
       else if (/bell/.test(name) || ch === 1) score.bell.push({ s, g: g * 0.5, semis: d1 - 64 });
       else score.kick.push({ s, pc: ((d1 % 12) + 12) % 12 });
     }
