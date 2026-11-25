@@ -81,12 +81,18 @@ automatically. Ctrl-C to stop.
 
 The home page is now the remix app: drop a song (or its 4 stems), and it
 builds a hardtekk remix in the browser: the song sped up (+4 st default),
-re-arranged from its own 4-bar blocks, sustained in-key kicks that play the
-song's own 808 notes in the drops, double bells, risers, impacts, echo
-throws, tape stop, fades, and a blown-out master. Live mixer (level + 3-band
-EQ per bus), kick picker (CC0 kicks in samples/cc0), drum editor grid with
-MIDI export/import, arrangement shuffle, WAV render. The previous generator
-is at classic.html.
+put on a rigid beat grid (a song whose tempo moves is varispeeded onto it),
+arranged in its own order on its 8-bar phrase lines with the drops on its
+hook, sustained in-key kicks that play the song's own 808 notes in the
+drops, double bells, risers, impacts, echo throws, tape stop, fades, and a
+blown-out master. Live mixer (level + 3-band EQ per bus, played through the
+render's master), kick picker (CC0 kicks in samples/cc0), drum editor grid
+with MIDI export/import, arrangement shuffle, WAV render. The previous
+generator is at classic.html.
+
+Score a render against the original song (beat, downbeat, cuts, hook, key):
+`node tools/remix_node.js out.wav --mix song.wav --layers` then
+`python listen.py out.wav --song song.wav`.
 
 Engine: remix-engine.js (runs in remix-worker.js; also in Node via
 tools/remix_node.js).

@@ -441,6 +441,7 @@ async function analyze(stems, progress = () => {}) {
   log(`  downbeat: backbeat evidence ${(bm_ / bse).toFixed(1)} SE${parity === null ? " (weak: section changes decide)" : ""}, bars start on beat ${off + 1} of the grid`);
   const b0 = grid.b0 + off * beat; nb -= off;
   for (const k in ev) ev[k] = ev[k].slice(off);
+  const full = Float32Array.from(dm, (v, i) => v + bm[i] + om[i] + vm[i]), fullDb = perBeat(full, grid.b0 + off * beat, beat, nb);
   const nBars = Math.floor(nb / 4);
   progress(0.35); await tick();
   // chords per half bar from the synths + 808
@@ -457,47 +458,42 @@ async function analyze(stems, progress = () => {}) {
   for (let i = 0; i < bassTrack.t.length; i++) if (bassTrack.voiced[i]) { const m = hzToMidi(bassTrack.f0[i]), d = m - Math.round(m), w = bassTrack.rms[i]; cs += w * Math.sin(2 * Math.PI * d); cc += w * Math.cos(2 * Math.PI * d); }
   const tuneCents = Math.round(Math.atan2(cs, cc) / (2 * Math.PI) * 100);
   const bassPc = []; for (let hb = 0; hb < nBars * 2; hb++) bassPc.push(trackPc(bassTrack, b0 + hb * 2 * beat + 0.05, b0 + (hb + 1) * 2 * beat));
-  return { bpm: grid.bpm, b0, beat, nBars, gridR: grid.R, ev, chords, key, bassPc, tuneCents, warp };
+  const barDb = Array.from({ length: nBars }, (_, b) => 10 * Math.log10(fullDb.slice(4 * b, 4 * b + 4).reduce((x, v) => x + Math.pow(10, v / 10), 0) / 4));
+  return { bpm: grid.bpm, b0, beat, nBars, gridR: grid.R, ev, chords, key, bassPc, tuneCents, warp, barDb };
 }
 
 /* ------------------------------------------------------------ arrangement */
-/** Sections from the song's own 4-bar blocks: [{name, src, n, kind}].
- *  Same shape as the hand-made v10 arrangement: intro with the pre-drop hook
- *  teased, drop, verse, break, build (hook), drop, verse, build, drop, outro. */
+/** Sections in the song's own order, cut on its 8-bar phrase lines: [{name, src, n, kind}].
+ *  Phrase lines: the bar phase (0-7) where loudness and chords change most. The hook: phrases whose chords
+ *  repeat elsewhere in the song and that are loud (repetition x loudness above the song's mean)
+ *  become the drops; the 4 bars before each drop build into it; quiet phrases are breaks, the rest verses;
+ *  first phrase intro, last outro. The song is never re-ordered, so its lines stay whole sentences. */
 function autoArrange(an) {
-  const G = Math.floor(an.nBars / 4), sum = (lane, g) => { let s = 0; for (let i = g * 16; i < g * 16 + 16 && i < lane.length; i++) s += lane[i]; return s; };
-  const drum = [], voc = [];
-  for (let g = 0; g < G; g++) { drum.push(sum(an.ev.kick, g) >= 12); voc.push(sum(an.ev.vocals, g) >= 8); }   // four on the floor
-  const runs = []; for (let g = 0; g < G;) { if (!drum[g]) { g++; continue; } let e = g; while (e < G && drum[e]) e++; runs.push([g, e]); g = e; }
-  const used = new Set(), take = gs => gs.forEach(g => used.add(g));
-  const preDrop = runs.map(([a]) => a - 1).filter(g => g >= 0 && !drum[g]);
-  const T = preDrop.filter(g => voc[g]).pop() ?? preDrop.pop() ?? Math.min(G - 1, 2);
-  const freeNoDrum = (from, n) => {
-    for (let g = from; g + n <= G; g++) { let ok = true; for (let k = 0; k < n; k++) if (drum[g + k] || used.has(g + k) || !voc[g + k] || g + k === T) ok = false; if (ok) return g; }
-    for (let g = 0; g + n <= G; g++) { let ok = true; for (let k = 0; k < n; k++) if (drum[g + k] || used.has(g + k) || g + k === T) ok = false; if (ok) return g; }
-    return null;
-  };
-  const S = [];
-  const add = (name, g, n, kind) => { if (g === null || g === undefined) return; S.push({ name, src: g * 4, n: n * 4, kind }); take([...Array(n).keys()].map(k => g + k)); };
-  add("intro", 0, Math.min(2, G), "intro");
-  const r1 = runs[0] || [2, Math.min(G, 6)];
-  add("drop1", r1[0], Math.min(4, r1[1] - r1[0]), "drop");
-  add("verse1", freeNoDrum(0, 2), 2, "verse");
-  add("break1", freeNoDrum(r1[1], 2), 2, "break");
-  S.push({ name: "build1", src: T * 4, n: 4, kind: "build" });
-  const rl = runs[runs.length - 1] || r1;
-  add("drop2", rl[0], Math.min(3, rl[1] - rl[0]), "drop");
-  const spare = [...Array(G).keys()].find(g => drum[g] && !used.has(g));
-  if (spare !== undefined) add("drop2b", spare, 1, "drop");
-  add("verse2", freeNoDrum(0, 2), 2, "verse");
-  const b2 = preDrop.find(g => !used.has(g) && g !== T); if (b2 !== undefined) add("build2", b2, 1, "build");
-  const rest = runs.map(([a, b]) => [a, b, [...Array(b - a).keys()].filter(k => !used.has(a + k)).length]).sort((x, y) => y[2] - x[2])[0];
-  const d3 = rest && rest[2] ? rest[0] + [...Array(rest[1] - rest[0]).keys()].find(k => !used.has(rest[0] + k)) : r1[0];
-  S.push({ name: "drop3", src: d3 * 4, n: Math.min(12, (G - d3) * 4), kind: "drop" });
-  S.push({ name: "drop3b", src: T * 4, n: 4, kind: "drop" });
-  const lastV = [...Array(G).keys()].filter(g => voc[g] && g + 1 < G).pop();
-  if (lastV !== undefined) S.push({ name: "outro", src: Math.max(0, lastV - 1) * 4, n: 8, kind: "outro" });
-  return { sections: S, teaser: T * 4 };
+  const nB = an.nBars, top = Math.max(...an.barDb), act = an.barDb.map(v => Math.pow(10, (v - top) / 20));   // bar loudness, 1 = loudest
+  const chroma = (b0, b1) => { const c = new Array(12).fill(0); for (let h = 2 * b0; h < 2 * b1 && h < an.chords.length; h++) an.chords[h].chroma.forEach((v, i) => c[i] += v); const n = Math.hypot(...c) || 1; return c.map(v => v / n); };
+  const cos = (x, y) => x.reduce((s, v, i) => s + v * y[i], 0);
+  const mean = (a, i0, i1) => { let s = 0, n = 0; for (let i = Math.max(0, i0); i < Math.min(a.length, i1); i++) { s += a[i]; n++; } return n ? s / n : 0; };
+  const nov = act.map((_, b) => b < 4 || b + 4 > nB ? 0 : Math.abs(mean(act, b, b + 4) - mean(act, b - 4, b)) + (1 - cos(chroma(b - 4, b), chroma(b, b + 4))));
+  let ph = 0, bs = -1; for (let o = 0; o < 8; o++) { let s = 0; for (let b = o; b < nB; b += 8) s += nov[b]; if (s > bs) { bs = s; ph = o; } }
+  const P = []; if (ph >= 4) P.push([0, ph]);                          // a pickup of 4+ bars is its own phrase
+  for (let b = ph >= 4 ? ph : 0; b < nB; b = P[P.length - 1][1]) { const e = b === 0 && ph ? ph + 8 : b + 8; P.push([b, Math.min(nB, e)]); }
+  if (P.length > 1 && P[P.length - 1][1] - P[P.length - 1][0] < 4) P[P.length - 2][1] = P.pop()[1];
+  const C = P.map(([a, e]) => chroma(a, e)), A = P.map(([a, e]) => mean(act, a, e));
+  const rep = C.map((c, i) => Math.max(0, ...C.map((d, j) => j === i ? 0 : cos(c, d))));
+  const score = rep.map((r, i) => r * A[i]), avg = score.reduce((x, y) => x + y, 0) / score.length;
+  const hook = score.map(v => v > avg); if (!hook.some(Boolean)) hook[score.indexOf(Math.max(...score))] = true;
+  const quiet = A.reduce((x, y) => x + y, 0) / A.length;
+  const S = [], add = (kind, src, n) => { if (n <= 0) return; const last = S[S.length - 1]; if (last && last.kind === kind && last.src + last.n === src && kind !== "build") last.n += n; else S.push({ kind, src, n }); };
+  P.forEach(([a, e], i) => {
+    if (i === 0 && P.length > 2) return add("intro", a, e - a);
+    if (i === P.length - 1 && P.length > 2 && !hook[i]) return add("outro", a, e - a);
+    if (hook[i]) return add("drop", a, e - a);
+    const k = A[i] < 0.75 * quiet ? "break" : "verse";
+    if (hook[i + 1] && e - a >= 8) { add(k, a, e - a - 4); add("build", e - 4, 4); } else if (hook[i + 1]) add("build", a, e - a); else add(k, a, e - a);
+  });
+  const count = {}; S.forEach(x => { count[x.kind] = (count[x.kind] || 0) + 1; x.name = x.kind + count[x.kind]; });
+  log(`  phrases from bar ${ph}: ${P.map(([a, e], i) => `${a}-${e - 1}${hook[i] ? "*" : ""}`).join(" ")}  (* = hook)`);
+  return { sections: S, teaser: P[hook.indexOf(true)][0] };
 }
 /** A new arrangement dealt from the song's own 4-bar blocks, the way a remixer re-cuts a track.
  *  Rules: intro first, a build before each drop, the hook comes back over the drums, outro last.
