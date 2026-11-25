@@ -1360,6 +1360,7 @@ function mixScore(ctx, score, samples, opts) {
   for (const [a, e, f0, f1, pw, kind] of A.sweeps) for (const c of bed) svf(c, a, e, i => f0 * Math.pow(f1 / f0, Math.pow((i - a) / (e - a), pw)), kind);
   const vox = A.voxComp.map(c => { const y = zeros(N); for (let i = 0; i < N; i++) y[i] = c[i] * (1 - drumM[i] * (1 - dk12[i])) * (1 + dropM[i] * lift) * 1.15; return y; });
   const meta = { tuneCents: ctx.tuneCents, blocks, barInfo, plan: ctx.plan, hits, OB0, BEAT, BAR, N, N_BARS, bpm: 60 / BEAT, key: ctx.key, scale: ctx.scale, arrangement: ctx.arrangement, score, mode: ctx.mode, chop: ctx.chop };
+  const kickBus = renderKick(samples, meta, o, act);                   // first: the bass ends where each kick starts
   let bass808 = st2(N);
   if (ctx.mode !== "chop") {                                            // the song's 808, or a dark sub playing its line
     const dk = `${o.bassLo}|${o.bassHi}`;
@@ -1370,7 +1371,7 @@ function mixScore(ctx, score, samples, opts) {
   }
   if (score.bass.length) { const b = renderBass(score.bass, meta, o); for (let c = 0; c < 2; c++) for (let i = 0; i < N; i++) bass808[c][i] += b[c][i]; }
   const L = { bed, bass808, vocals: vox, perc: layers.perc, fx: layers.fx };
-  L.kick = renderKick(samples, meta, o, act);
+  L.kick = kickBus;
   score.kick.forEach((e, i) => { e.hz = hits[i].hz; });                // the frequency actually played, for MIDI
   L.sfx = st2(N);
   applyEffects(L, meta, o);
@@ -1537,15 +1538,19 @@ function renderKick(samples, meta, opts, act = null) {
     }
     _kickCache.set(key, y); return y;
   };
+  /** Where a kick is heard: the steepest rise of its 1 ms energy in its first 50 ms (13-14 ms into the default
+   *  kick). Kicks start that much early so their attack, not their first sample, is on the beat. */
+  const attack = y => { const m = mono(y), e = new Float64Array(Math.min(m.length, Math.round(0.05 * SR))); let acc = 0, bi = 0, bd = -Infinity;
+    for (let i = 0; i < e.length; i++) { acc += m[i] * m[i] - (i >= 44 ? m[i - 44] * m[i - 44] : 0); e[i] = acc; if (i && e[i] - e[i - 1] > bd) { bd = e[i] - e[i - 1]; bi = i; } } return bi / SR; };
   const bus = st2(N), hits = meta.hits;
   hits.forEach((h, j) => {
     const gap = (h.end ?? (j + 1 < hits.length ? hits[j + 1].t : h.t + 1)) - h.t;
     h.hz = noteHz(h.pc) * Math.pow(2, o.kickTune / 12);
-    const k = kickFor(h.pc, h.long);
-    let y = slice2(k, 0, Math.round(Math.min(gap - 0.004, k[0].length / SR) * SR));
+    const k = kickFor(h.pc, h.long), at = k.attack ?? (k.attack = attack(k));
+    let y = slice2(k, 0, Math.round(Math.min(gap - 0.004 + at, k[0].length / SR) * SR));
     // outside the drops the bass layer ducks under each kick (see mixScore), so the kick keeps its body
     if (h.lp) y = filt2(y, "low", h.lp);
-    place(bus, fadeOut(y, 0.006), h.t);
+    h.start = h.t - at; place(bus, fadeOut(y, 0.006), h.start);
   });
   if (act) for (const c of [0, 1]) { const p = band(bus[c], 900, 4200); for (let i = 0; i < N; i++) bus[c][i] -= p[i] * 0.5 * act[i]; }
   // level: -10.5 dB RMS over the first drop
@@ -1557,7 +1562,7 @@ function renderKick(samples, meta, opts, act = null) {
 /** The score's bass lane: a driven two-saw stab per note an octave over the kick's tail, cut before the next
  *  kick or bass note, so kick and bass never sound together. Level: -12 dB RMS over the first drop. */
 function renderBass(events, meta, o) {
-  const { N, OB0, BEAT } = meta, bus = zeros(N), kicks = meta.hits.map(h => h.t), times = events.map(e => OB0 + e.s * BEAT / 4);
+  const { N, OB0, BEAT } = meta, bus = zeros(N), kicks = meta.hits.map(h => h.start ?? h.t), times = events.map(e => OB0 + e.s * BEAT / 4);
   events.forEach((e, j) => {
     const t0 = times[j], end = Math.min(kicks.find(x => x > t0 + 1e-4) ?? Infinity, times[j + 1] ?? Infinity, t0 + 2 * BEAT);
     const n = Math.round((end - t0 - 0.004) * SR), i0 = Math.round(t0 * SR);
