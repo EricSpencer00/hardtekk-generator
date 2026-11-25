@@ -827,6 +827,8 @@ function mixScore(ctx, score, samples, opts) {
   score.kick.forEach((e, i) => { e.hz = hits[i].hz; });                // the frequency actually played, for MIDI
   L.sfx = st2(N);
   applyEffects(L, meta, o);
+  const dropLift = Math.pow(10, 2 / 20) - 1;                            // drops hit the master 2 dB harder
+  for (const lay of Object.values(L)) for (const c of lay) for (let i = 0; i < N; i++) c[i] *= 1 + dropM[i] * dropLift;
   return { layers: L, meta, masks: { drumM, dropM, act }, ctx };
 }
 
@@ -1078,24 +1080,26 @@ function octaveBalance(st) {
   const v = REF_OCTAVES.map(c => { let e = 0; for (let k = 1; k < N / 2; k++) { const f = k * SR / N; if (f >= c / Math.SQRT2 && f < c * Math.SQRT2) e += P[k]; } return 10 * Math.log10(e + 1e-20); });
   const m = Math.max(...v); return v.map(a => a - m);
 }
-/** EQ a stereo mix (in place) toward the reference octave balance; returns the gains used. */
+/** EQ a stereo mix (in place) toward the reference octave balance; returns the filters applied. */
 function matchEq(st, passes = 2, limit = 6) {
-  const total = new Array(REF_OCTAVES.length).fill(0);
+  const used = [];
   for (let p = 0; p < passes; p++) {
-    const cur = octaveBalance(st);
-    const g = cur.map((v, i) => Math.max(-limit, Math.min(limit, 0.8 * (REF_BALANCE[i] - v))));
-    for (const c of st) g.forEach((gi, i) => {
-      if (Math.abs(gi) < 0.3) return;
-      const f = REF_OCTAVES[i], t = i === 0 ? "lowshelf" : i === REF_OCTAVES.length - 1 ? "highshelf" : "peak";
-      biquad(c, rbj(t, t === "lowshelf" ? 45 : t === "highshelf" ? 11000 : f, t === "peak" ? 1.4 : 0.7, SR, gi));
+    const pass = [];
+    octaveBalance(st).forEach((v, i) => {
+      const g = Math.max(-limit, Math.min(limit, 0.8 * (REF_BALANCE[i] - v)));
+      if (Math.abs(g) < 0.3) return;
+      const type = i === 0 ? "lowshelf" : i === REF_OCTAVES.length - 1 ? "highshelf" : "peak";
+      pass.push({ type, f: type === "lowshelf" ? 45 : type === "highshelf" ? 11000 : REF_OCTAVES[i], q: type === "peak" ? 1.4 : 0.7, g });
     });
-    g.forEach((gi, i) => total[i] += gi);
+    for (const c of st) for (const e of pass) biquad(c, rbj(e.type, e.f, e.q, SR, e.g));
+    used.push(...pass);
   }
-  return total;
+  return used;
 }
 
-/** Sum the layers with per-layer gains (dB) and EQ, then the blown-out master. */
-async function master(layers, meta, masks, mixOpts = {}, progress = () => {}) {
+/** Sum the layers with per-layer gains (dB) and EQ, high-pass at 25 Hz, match-EQ: what the clipper gets.
+ *  Returns the mix and the match-EQ filters applied. */
+function mixdown(layers, meta, mixOpts = {}) {
   const N = meta.N, gains = { kick: 0, bass808: 0, bed: 0, vocals: 0, perc: 0, fx: 0, sfx: 0, ...(mixOpts.gains || {}) };
   const eqs = mixOpts.eq || {};
   const mix = st2(N);
@@ -1108,12 +1112,15 @@ async function master(layers, meta, masks, mixOpts = {}, progress = () => {}) {
       for (let i = 0; i < N; i++) mix[c][i] += y[i] * g;
     }
   }
-  const lift = Math.pow(10, 2 / 20) - 1;   // drops hit the master harder
-  for (let c = 0; c < 2; c++) { for (let i = 0; i < N; i++) mix[c][i] *= 1 + masks.dropM[i] * lift; biquad(mix[c], rbj("high", 25, Math.SQRT1_2)); }
-  if (mixOpts.matchEq ?? DEFAULTS.matchEq) {
-    const gains = matchEq(mix);
-    log("  match EQ (dB @ 31..16k): " + gains.map(g => g.toFixed(1)).join(" "));
-  }
+  for (const c of mix) biquad(c, rbj("high", 25, Math.SQRT1_2));
+  return { mix, eq: mixOpts.matchEq ?? DEFAULTS.matchEq ? matchEq(mix) : [] };
+}
+/** The render's master in the live preview: the match EQ for the default mix and the loudness it reaches before the clipper. */
+function previewTone(layers, meta) { const { mix, eq } = mixdown(layers, meta); return { eq, lufs: lufs(mix) }; }
+/** Drive the mix into an oversampled clipper until it reaches the target loudness, then limit true peaks. */
+async function master(layers, meta, masks, mixOpts = {}, progress = () => {}) {
+  const { mix, eq } = mixdown(layers, meta, mixOpts), N = meta.N;
+  log("  match EQ: " + eq.map(e => `${e.g > 0 ? "+" : ""}${e.g.toFixed(1)} dB @ ${e.f} Hz`).join(", "));
   progress(0.2); await tick();
   const target = mixOpts.targetLufs ?? DEFAULTS.targetLufs;
   const run = g => brickwall(brickwall(clipOs(mix.map(c => Float32Array.from(c, v => v * Math.pow(10, g / 20))), 1), -0.8), -0.3);
@@ -1184,6 +1191,6 @@ function encodeWav(st, sr = SR) {
   return b;
 }
 
-const API = { SR, NAMES, DEFAULTS, LOG, separate, analyze, autoArrange, parseArrangement, build, mixScore, renderKick, encodeMidi, decodeMidi, shuffleArrangement, master, encodeWav, lufs, resample, repitch, yinTrack, mono };
+const API = { SR, NAMES, DEFAULTS, LOG, separate, analyze, autoArrange, parseArrangement, build, mixScore, renderKick, encodeMidi, decodeMidi, shuffleArrangement, master, previewTone, encodeWav, lufs, resample, repitch, yinTrack, mono };
 if (typeof module !== "undefined" && module.exports) module.exports = API; else root.REMIX = API;
 })(typeof self !== "undefined" ? self : this);

@@ -29,8 +29,11 @@ async function build(opts) {
   const t0 = Date.now();
   S.b = await R.build(S.stems, S.samples, S.an, opts, progress("building"), S.cache);
   R.LOG.fn(`built in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+  sendBuilt();
+}
+function sendBuilt() {
   const { out, transfer } = copyLayers(S.b.layers);
-  postMessage({ type: "built", layers: out, meta: summary(S.b) }, transfer);
+  postMessage({ type: "built", layers: out, meta: summary(S.b), tone: R.previewTone(S.b.layers, S.b.meta) }, transfer);
 }
 
 onmessage = async e => {
@@ -52,16 +55,14 @@ onmessage = async e => {
       if (m.opts) S.opts = { ...S.opts, ...m.opts };
       S.b = R.mixScore(S.b.ctx, m.score, S.samples, S.opts);
       R.LOG.fn(`drums re-rendered in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
-      const { out, transfer } = copyLayers(S.b.layers);
-      postMessage({ type: "built", layers: out, meta: summary(S.b) }, transfer);
+      sendBuilt();
     } else if (m.type === "kick") {
       const t0 = Date.now();
       S.opts = { ...S.opts, ...m.opts };
       if (m.sample) { S.samples.kick = m.sample.data; S.samples._kickId = m.sample.id; delete S.samples._kickNorm; }
       S.b = R.mixScore(S.b.ctx, S.b.meta.score, S.samples, S.opts);       // same path as an edit: fades and FX stay on
       R.LOG.fn(`kick re-rendered in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
-      const { out, transfer } = copyLayers(S.b.layers);
-      postMessage({ type: "built", layers: out, meta: summary(S.b) }, transfer);
+      sendBuilt();
     } else if (m.type === "master") {
       const r = await R.master(S.b.layers, S.b.meta, S.b.masks, m.mix, progress("mastering"));
       const wav = R.encodeWav(r.out);
