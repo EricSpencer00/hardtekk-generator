@@ -499,7 +499,7 @@ function chromaWindows(x, wins, fmin = 32, fmax = 4200) {
   return wins.map(([t0, t1]) => {
     const c = new Float64Array(12); const a = Math.round(t0 * SR), e = Math.round(t1 * SR);
     for (let s = a; s + N <= Math.max(e, a + N); s += N / 2) {
-      for (let i = 0; i < N; i++) { const j = s + i; re[i] = j < x.length ? x[j] * w[i] : 0; im[i] = 0; }
+      for (let i = 0; i < N; i++) { const j = s + i; re[i] = j >= 0 && j < x.length ? x[j] * w[i] : 0; im[i] = 0; }
       fft(re, im);
       for (const [k, pc] of kb) c[pc] += re[k] * re[k] + im[k] * im[k];
     }
@@ -530,7 +530,8 @@ function triadRoot(c) {
  *  warped onto a rigid grid (`stemsW`) when the song's tempo moves. */
 async function analyze(stems, progress = () => {}) {
   let dm = mono(stems.drums), grid = beatGrid(dm), warp = null;
-  const src = { beats: grid.beats, per: 60 / grid.bpm, ph: grid.b0, on: grid.on, moving: false };
+  const src = { beats: grid.beats, per: 60 / grid.bpm, ph: grid.b0, on: grid.on, moving: false, down: 0,
+                onK: onsetTimes(filtfilt(dm, "low", 150), 0.08, 0.2), onM: onsetTimes(filtfilt(dm, "low", 5000), 0.05, 0.2) };
   // A song whose tempo moves is warped onto a rigid grid (the stems are replaced in place), but only when its
   // tracked beats stray from one fixed tempo by more than a flam (10 ms, p90) AND explain the drum onsets better
   // than one tempo by more than chance (2 / sqrt(onsets): two standard errors of the phase concentration).
@@ -567,6 +568,7 @@ async function analyze(stems, progress = () => {}) {
   for (let o = 0; o < 4; o++) { if (parity !== null && o % 2 !== parity) continue; let s = 0; for (let i = o; i < nb; i += 4) s += nov[i] * ((i - o) % 16 === 0 ? 2 : 1); if (s > bs) { bs = s; off = o; } }
   log(`  downbeat: backbeat evidence ${(bm_ / bse).toFixed(1)} SE${parity === null ? " (weak: section changes decide)" : ""}, bars start on beat ${off + 1} of the grid`);
   const b0 = grid.b0 + off * beat; nb -= off;
+  src.down = src.moving ? ((Math.round((b0 - src.beats[0]) / beat) % 4) + 4) % 4 : off;   // beat 1 on src's beat numbering
   for (const k in ev) ev[k] = ev[k].slice(off);
   const full = Float32Array.from(dm, (v, i) => v + bm[i] + om[i] + vm[i]), fullDb = perBeat(full, grid.b0 + off * beat, beat, nb);
   const nBars = Math.floor(nb / 4);
@@ -639,17 +641,60 @@ async function analyzePhrases(stems, an, progress = () => {}) {
     let sx = 0, sy = 0, sxx = 0, sxy = 0, n = B.length; B.forEach((t, i) => { sx += i; sy += t; sxx += i * i; sxy += i * t; });
     return (n * sxy - sx * sy) / (n * sxx - sx * sx);
   };
+  // the song's beat, windows of +-8 beats every 4 beats: a straight grid fitted to the drum onsets there. Period
+  // (within 1.5% of the song's) and the 16th grid's phase from where all onsets cluster on beat, 8th and 16th (ok
+  // beyond 2 standard errors); which 16th is the beat from where the kick's (and, at half weight, the snare band's)
+  // onsets fall, chosen for the whole song at once (Viterbi: a jump of n 16ths between windows costs 0.3 n of hit
+  // share) so a syncopated kick does not flip single windows onto the "and"
+  const near = (o, a, b) => { const T = [], Wt = []; o.t.forEach((t, k) => { if (t >= a && t < b) { T.push(t); Wt.push(o.s[k]); } }); return [T, Wt]; };
+  const fit16 = (a, b) => {
+    const Pc = localP(a, b), [T, Wt] = near(src.on, a, b);
+    if (T.length < 8) return { ok: false, P: Pc };
+    let g = { s: -1 };
+    for (let f = -0.015; f <= 0.0151; f += 0.0005) {
+      const P = Pc * (1 + f), r4 = circFit(T, Wt, P / 4), sc = circFit(T, Wt, P).R + circFit(T, Wt, P / 2).R + r4.R;
+      if (sc > g.s) g = { s: sc, P, ph16: r4.phase, R: r4.R };
+    }
+    if (g.R <= 2 / Math.sqrt(T.length)) return { ok: false, P: Pc };
+    const [K, Kw] = near(src.onK, a, b), [M, Mw] = near(src.onM, a, b), hit = new Float64Array(4);
+    for (const [U, Uw, w] of [[K, Kw, 1], [M, Mw, 0.5]]) U.forEach((t, k) => { const x = (((t - g.ph16) / g.P) % 1 + 1) % 1 * 4, j = Math.round(x) % 4; if (Math.abs(x - Math.round(x)) < 0.25) hit[j] += w * Uw[k]; });
+    const tot = hit.reduce((x, y) => x + y, 0) || 1;
+    return { ok: true, P: g.P, ph16: g.ph16, R: g.R, hit: Array.from(hit, h => h / tot) };
+  };
+  const W_ = []; for (let c = Math.max(0, src.ph); c < L / SR; c += 4 * P0) { const g = fit16(c - 8 * P0, c + 8 * P0); if (g.ok) W_.push({ c, ...g }); }
+  const at = (ph, P, t) => ph + Math.round((t - ph) / P) * P;            // the grid's beat nearest t
+  const cand = (w, j) => at(w.ph16 + j * w.P / 4, w.P, w.c), d16 = (x, y, P) => Math.round(4 * (((x - y) / P % 1 + 1.5) % 1 - 0.5));
+  const vit = W_.map(() => ({ v: new Float64Array(4), from: new Int8Array(4) }));
+  W_.forEach((w, i) => {
+    for (let j = 0; j < 4; j++) {
+      let best = 0, bj = 0;
+      if (i > 0) { best = -Infinity; const u = W_[i - 1]; for (let k = 0; k < 4; k++) { const v = vit[i - 1].v[k] - 0.3 * Math.abs(d16(cand(w, j), at(cand(u, k), u.P, w.c), w.P)); if (v > best) { best = v; bj = k; } } }
+      vit[i].v[j] = best + w.hit[j]; vit[i].from[j] = bj;
+    }
+  });
+  for (let i = W_.length - 1, j = W_.length ? vit[i].v.indexOf(Math.max(...vit[i].v)) : 0; i >= 0; j = vit[i].from[j], i--) W_[i].beat = cand(W_[i], j);
+  // the grid around a phrase: its own fit for period and 16th phase, the beat at the 16th nearest the song's beat there
+  const fitGrid = (a, b) => {
+    const g = fit16(a, b); if (!g.ok || !W_.length) return { ok: false, P: g.P };
+    const mid = (a + b) / 2, w = W_.reduce((x, y) => Math.abs(y.c - mid) < Math.abs(x.c - mid) ? y : x);
+    return { ok: true, P: g.P, ph: at(g.ph16, g.P / 4, at(w.beat, w.P, mid)), R: g.R };
+  };
+  const beatAt = k => { const B = src.beats; return !src.moving ? src.ph + k * P0 : k <= 0 ? B[0] + k * P0 : k >= B.length - 1 ? B[B.length - 1] + (k - B.length + 1) * P0 : B[k]; };
+  let snapped = 0;
   const all = ph.map((p, i) => {
     let smax = 0; von.t.forEach((t, k) => { if (t >= p.t0 - 0.06 && t < p.t1) smax = Math.max(smax, von.s[k]); });
     const k0 = von.t.findIndex((t, k) => t >= p.t0 - 0.06 && t < p.t0 + Math.min(0.3, 0.6 * P0) && von.s[k] >= 0.3 * smax);
-    const on = k0 >= 0 ? von.t[k0] : p.t0, P = localP(on - 2 * P0, p.t1 + 2 * P0);
-    // where the onset sits in the bar, only if the drum onsets around it hold to the beat (beyond 2 standard errors)
-    let W = 0, n = 0; const z = [0, 0, 0, 0];
-    src.on.t.forEach((t, k) => { if (t < on - 4 * P0 || t > p.t1 + 4 * P0) return; const a = 2 * Math.PI * beatPos(t), w = src.on.s[k]; z[0] += w * Math.cos(a); z[1] += w * Math.sin(a); z[2] += w * Math.cos(2 * a); z[3] += w * Math.sin(2 * a); W += w; n++; });
-    const gridR = (Math.hypot(z[0], z[1]) + Math.hypot(z[2], z[3])) / (2 * W || 1), gridOk = n >= 4 && gridR > 2 / Math.sqrt(n);
-    const bp = beatPos(on), q = gridOk ? [0, 0.25, -0.5, -0.25][Math.round(4 * (bp - Math.floor(bp))) % 4] : 0;
+    const on = k0 >= 0 ? von.t[k0] : p.t0, g = fitGrid(on - 8 * P0, p.t1 + 8 * P0), P = g.P;
+    // the bar the phrase starts in (a start in its last beat is a pickup into the next bar), its bar line on the
+    // local grid; the phrase keeps its place in the bar. No grid: the onset itself becomes the bar line.
+    let bar0 = on, q = 0;
+    if (g.ok) {
+      const k = beatPos(on); let kb = src.down + 4 * Math.floor((k - src.down) / 4); if (k - kb >= 3) kb += 4;
+      bar0 = g.ph + Math.round((beatAt(kb) - g.ph) / P) * P; q = (on - bar0) / P;
+    } else snapped++;
+    const gridR = g.R ?? 0, gridOk = g.ok;
     let nv = 0, na = 0; for (let k = 0; k < vt.t.length; k++) if (vt.t[k] >= p.t0 && vt.t[k] < p.t1) { na++; nv += vt.voiced[k]; }
-    const bar0 = on - q * P, kb = Math.max(1, Math.ceil((p.t1 - bar0) / P - 0.1));
+    const kb = Math.max(1, Math.ceil((p.t1 - bar0) / P - 0.1));
     return { i, t0: p.t0, t1: p.t1, s0: Math.min(p.t0, on) - 0.03, on, q, P, bar0, kb, gridR, gridOk, vf: na ? nv / na : 0, loud: rmsDb(full, Math.round(on * SR), Math.round(p.t1 * SR)) };
   });
   progress(0.6); await tick();
@@ -705,7 +750,7 @@ async function analyzePhrases(stems, an, progress = () => {}) {
     const top = hookRuns.reduce((a, b) => rs_(b) > rs_(a) ? b : a), ti = top.map(p => list.indexOf(p));
     hookRuns = [top, ...hookRuns.filter(r => r !== top && dur(r) >= 0.5 * dur(top) && r.some(p => ti.some(i => S[i][list.indexOf(p)] >= thr))).sort((a, b) => rs_(b) - rs_(a))];
   }
-  log(`  phrases: ${all.length} found, ${list.length} usable (voiced share >= ${(0.5 * vfMed).toFixed(2)}); hook by ${how} (evidence ${conf.toFixed(1)} SD): ${hookRuns.map(r => r.map(p => p.on.toFixed(1)).join("+")).join(", ")} s`);
+  log(`  phrases: ${all.length} found, ${list.length} usable (voiced share >= ${(0.5 * vfMed).toFixed(2)});${snapped ? ` ${snapped} with no clear beat around them start on their bar line;` : ""} hook by ${how} (evidence ${conf.toFixed(1)} SD): ${hookRuns.map(r => r.map(p => p.on.toFixed(1)).join("+")).join(", ")} s`);
   progress(1);
   return { all, list, hookRuns: hookRuns.map(r => r.map(p => p.i)), hook: { how, conf }, notes, P0 };
 }
