@@ -57,7 +57,7 @@ function loadSamples(dir, kickFile) {
   fs.writeFileSync(out, Buffer.from(R.encodeWav(m.out)));
   const NAMES = R.NAMES;
   fs.writeFileSync(out.replace(/\.wav$/, ".json"), JSON.stringify({
-    analysis: { bpm: an.bpm, b0: an.b0, nBars: an.nBars, key: an.key, chords: an.chords.map(c => NAMES[c.root] + (c.minor ? "m" : "")), bassPc: an.bassPc, ev: Object.fromEntries(Object.entries(an.ev).map(([k, v]) => [k, Array.from(v)])) },
+    analysis: { bpm: an.bpm, b0: an.b0, nBars: an.nBars, key: an.key, chords: an.chords.map(c => NAMES[c.root] + (c.minor ? "m" : "")), bassPc: an.bassPc, ev: Object.fromEntries(Object.entries(an.ev).map(([k, v]) => [k, Array.from(v)])), warp: an.warp, semis: opts.semis ?? R.DEFAULTS.semis },
     blocks: b.meta.blocks, OB0: b.meta.OB0, BEAT: b.meta.BEAT, key: b.meta.key,
     hits: b.meta.hits.map(h => [h.t, NAMES[h.pc], h.long, h.kind]),
   }));

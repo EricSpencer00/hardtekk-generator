@@ -218,12 +218,156 @@ def report(metrics, specs, source, title):
     print()
 
 
+KS_MAJ = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+KS_MIN = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+
+
+def structure(render, song):
+    """Score a remix-app render (render.wav + render.json from tools/remix_node.js, plus its --layers
+    WAVs if present) against an offline reference computed from the original song with librosa:
+    the song's beats, its backbeat, its section boundaries, its hook and its key."""
+    d = json.load(open(render.rsplit(".", 1)[0] + ".json"))
+    an = d["analysis"]
+    y, _ = librosa.load(song, sr=SR, mono=True)
+    hop = 128
+    yp = librosa.effects.percussive(y, margin=2)
+    env = librosa.onset.onset_strength(y=yp, sr=SR, hop_length=hop)
+    # librosa's tempo prior leans to 120 BPM and lands on 2:3 / 3:2 aliases (165 BPM eurodance -> 110);
+    # take the candidate whose beat grid holds the onsets tightest, then track beats around it
+    t0 = float(librosa.feature.tempo(onset_envelope=env, sr=SR, hop_length=hop)[0])
+    tt = librosa.frames_to_time(np.arange(len(env)), sr=SR, hop_length=hop)
+    w = np.maximum(env - np.median(env), 0)
+    conc = lambda bpm: abs(np.sum(w * np.exp(2j * np.pi * tt * bpm / 60))) / w.sum()
+    cands = [c for c in (t0, t0 * 1.5, t0 / 1.5) if 60 <= c <= 200]
+    start = max(cands, key=lambda c: max(conc(c + d) for d in np.linspace(-1, 1, 41)))
+    _, beats = librosa.beat.beat_track(onset_envelope=env, sr=SR, hop_length=hop, units="time", start_bpm=start)
+    per = float(np.median(np.diff(beats)))
+    rate = 2 ** (an.get("semis", 4) / 12)
+    BEAT, OB0 = d["BEAT"], d["OB0"]
+    BAR, SB0 = 4 * BEAT, an["b0"] / rate
+    warp = an.get("warp")
+
+    def to_song(t):
+        """render time -> original song time (None outside the arranged blocks)"""
+        for b in d["blocks"]:
+            a = OB0 + b["out"] * BAR
+            if a <= t < a + b["n"] * BAR:
+                u = (t - a + SB0 + b["src"] * BAR) * rate
+                if warp:
+                    s, w = np.array(warp["src"]), np.array(warp["dst"])
+                    r = (s[-1] - s[0]) / (w[-1] - w[0])
+                    u = s[0] + (u - w[0]) * r if u < w[0] else s[-1] + (u - w[-1]) * r if u > w[-1] else float(np.interp(u, w, s))
+                return u
+        return None
+
+    out = {}
+    # 1. kicks on the song's beat: every added kick vs the nearest reference beat or half-beat
+    grid = np.sort(np.concatenate([beats, (beats[1:] + beats[:-1]) / 2]))
+    offs = []
+    for t, *_ in d["hits"]:
+        u = to_song(t)
+        if u is not None and beats[0] - per < u < beats[-1] + per:
+            offs.append(abs(grid[np.argmin(np.abs(grid - u))] - u))
+    offs = 1000 * np.array(offs)
+    out["kick_grid_ms_median"] = round(float(np.median(offs)), 1)
+    out["kick_grid_ms_p90"] = round(float(np.percentile(offs, 90)), 1)
+    out["kick_grid_over_15ms"] = round(float(np.mean(offs > 15)), 2)
+    # 2. downbeat: the song's kick beats (1, 3) vs snare beats (2, 4) from low vs 1-5 kHz onsets at its beats
+    S = np.abs(librosa.stft(yp, n_fft=1024, hop_length=hop))
+    fr = librosa.fft_frequencies(sr=SR, n_fft=1024)
+
+    def flux(lo, hi):
+        m = np.log1p(100 * S[(fr >= lo) & (fr < hi)])
+        return np.concatenate([[0], np.maximum(np.diff(m, axis=1), 0).sum(0)])
+    lo, hi = flux(20, 150), flux(1000, 5000)
+    bf = librosa.time_to_frames(beats, sr=SR, hop_length=hop)
+    pk = lambda x: np.array([x[max(0, f - 3):f + 4].max() for f in bf])
+    z = lambda v: (v - v.mean()) / (v.std() + 1e-9)
+    dd = z(pk(lo)) - z(pk(hi))
+    pairs = np.array([dd[i] - dd[i + 1] for i in range(0, len(dd) - 1, 2)])
+    tstat = pairs.mean() / (pairs.std() / np.sqrt(len(pairs)) + 1e-9)
+    kick_par = 0 if tstat > 0 else 1
+    starts = [to_song(OB0 + b["out"] * BAR + 1e-4) for b in d["blocks"]]
+    pars = [int(np.argmin(np.abs(beats - u))) % 2 for u in starts if u is not None]
+    out["downbeat_on_kick_beat"] = f"{np.mean([p == kick_par for p in pars]):.0%}" + ("" if abs(tstat) > 3 else f" (weak backbeat evidence, {tstat:+.1f} SE)")
+    # 3. sections: reference boundaries = Foote novelty peaks (16-beat checkerboard kernel) on the
+    #    self-similarity of beat-synced chroma+MFCC, one per ~8 bars, at least 4 bars apart
+    bfr = librosa.time_to_frames(beats, sr=SR, hop_length=512)
+    C = librosa.util.sync(librosa.feature.chroma_cqt(y=y, sr=SR, hop_length=512), bfr, pad=False)
+    M = librosa.util.sync(librosa.feature.mfcc(y=y, sr=SR, hop_length=512, n_mfcc=13), bfr, pad=False)
+    F = np.vstack([librosa.util.normalize(C, axis=0), librosa.util.normalize(M, axis=0)])
+    Fn = F / (np.linalg.norm(F, axis=0) + 1e-9); SSM = Fn.T @ Fn
+    L = 16; g = np.outer(np.r_[-np.ones(L), np.ones(L)], np.r_[-np.ones(L), np.ones(L)])
+    nov = np.array([np.sum(SSM[i - L:i + L, i - L:i + L] * g) if L <= i < len(SSM) - L else 0 for i in range(len(SSM))])
+    order = np.argsort(-nov); bnd = []
+    for i in order:
+        if nov[i] <= 0 or len(bnd) >= max(2, len(beats) // 32): break
+        if all(abs(i - j) >= 16 for j in bnd): bnd.append(i)
+    bnd = sorted([0] + bnd)
+    bt = np.append(beats[np.minimum(bnd, len(beats) - 1)], beats[-1])
+    cuts = []
+    for b in d["blocks"]:
+        for t in (OB0 + b["out"] * BAR + 1e-4, OB0 + (b["out"] + b["n"]) * BAR - 1e-4):
+            u = to_song(t)
+            if u is not None:
+                cuts.append(np.min(np.abs(bt - u)) <= 1.01 * per)
+    out["cuts_on_section_lines"] = f"{np.mean(cuts):.0%}"
+    # 4. hook: the loudest segment that repeats (chroma similarity to another segment), and its repeats
+    rms = librosa.util.sync(librosa.feature.rms(y=y, hop_length=512), librosa.time_to_frames(beats, sr=SR, hop_length=512))[0]
+    seg = [(bnd[i], bnd[i + 1] if i + 1 < len(bnd) else len(beats) - 1) for i in range(len(bnd))]
+    chs = [librosa.util.normalize(C[:, a:b].mean(1)) if b > a else np.zeros(12) for a, b in seg]
+    sim = np.array([[float(chs[i] @ chs[j]) for j in range(len(seg))] for i in range(len(seg))])
+    loud = np.array([rms[a:b].mean() if b > a else 0 for a, b in seg]); loud = loud / (loud.max() + 1e-9)
+    rep = np.array([max([sim[i, j] for j in range(len(seg)) if abs(i - j) > 1] or [0]) for i in range(len(seg))])
+    h = int(np.argmax(loud * rep))
+    hook = [i for i in range(len(seg)) if i == h or (sim[h, i] > 0.95 and loud[i] > 0.7)]
+    spans = [(beats[seg[i][0]], beats[min(seg[i][1], len(beats) - 1)]) for i in hook]
+    inhook = []
+    for b in d["blocks"]:
+        if b["kind"] != "drop":
+            continue
+        for q in range(b["n"] * 4):
+            u = to_song(OB0 + b["out"] * BAR + (q + 0.5) * BEAT)
+            if u is not None:
+                inhook.append(any(a <= u < e for a, e in spans))
+    out["drop_beats_in_hook"] = f"{np.mean(inhook):.0%}" if inhook else "n/a"
+    # 5. kick vs bass: share of the kick's sounding time (<150 Hz) that the bass also sounds
+    base = render.rsplit(".", 1)[0]
+    if os.path.exists(base + "_kick.wav"):
+        import soundfile as sf
+        from scipy.signal import butter as bt_, sosfiltfilt
+        sos = bt_(4, 150, "lp", fs=SR, output="sos")
+        e = []
+        for k_ in ("kick", "bass808"):
+            x = sosfiltfilt(sos, sf.read(f"{base}_{k_}.wav")[0].mean(1))
+            n = len(x) // 441 * 441
+            e.append(np.sqrt((x[:n].reshape(-1, 441) ** 2).mean(1)))
+        ka, ba = e[0] > 0.1 * np.percentile(e[0], 99), e[1] > 0.1 * np.percentile(e[1], 99)
+        out["kick_bass_overlap"] = f"{np.mean(ba[ka]):.0%}"
+    # 6. key: Krumhansl on the whole song's chroma vs the engine's key
+    ch = librosa.feature.chroma_cqt(y=y, sr=SR).mean(1)
+    best = max(((np.corrcoef(np.roll(p, t), ch)[0, 1], t, m) for p, m in ((KS_MAJ, "major"), (KS_MIN, "minor")) for t in range(12)))
+    names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    et, em = an["key"]["tonic"], an["key"]["mode"]
+    rel = (best[2] == "major" and em == "minor" and et == (best[1] + 9) % 12) or (best[2] == "minor" and em == "major" and et == (best[1] + 3) % 12)
+    out["key"] = f"engine {names[et]} {em}, reference {names[best[1]]} {best[2]}: " + ("match" if (et, em) == (best[1], best[2]) else "relative" if rel else "MISMATCH")
+    out["bpm"] = f"engine {an['bpm']:.2f}, reference {60 / per:.2f}"
+    return out
+
+
 def main():
     p = argparse.ArgumentParser(description="hardtekk render report card")
     p.add_argument("wav", nargs="?", help="render to grade")
     p.add_argument("--bpm", type=float, default=None, help="target BPM (else detected)")
     p.add_argument("--reference", help="measure a real hardtekk track and save it as the target profile")
+    p.add_argument("--song", help="the original song: score the remix-app render's beat, downbeat, cuts, hook, kick/bass and key against it")
     a = p.parse_args()
+
+    if a.song:
+        print(f"\nSTRUCTURE {a.wav}  (reference: {os.path.basename(a.song)})")
+        for k, v in structure(a.wav, a.song).items():
+            print(f"  {k:22s} {v}")
+        return
 
     if a.reference:
         m = analyze(a.reference, a.bpm)
