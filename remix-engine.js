@@ -25,14 +25,6 @@ function rmsDb(a, i0 = 0, i1 = a.length) {
   return 10 * Math.log10(s / Math.max(1, i1 - i0) + 1e-24);
 }
 function peakAbs(a) { let m = 0; for (let i = 0; i < a.length; i++) { const v = Math.abs(a[i]); if (v > m) m = v; } return m; }
-function percentileAbs(a, p) {
-  // histogram on |x| in dB steps; exact enough for gain staging
-  const B = 2000, h = new Uint32Array(B); let m = peakAbs(a) || 1;
-  for (let i = 0; i < a.length; i++) h[Math.min(B - 1, Math.floor(Math.abs(a[i]) / m * (B - 1)))]++;
-  let need = p * a.length, c = 0;
-  for (let b = 0; b < B; b++) { c += h[b]; if (c >= need) return (b + 0.5) / (B - 1) * m; }
-  return m;
-}
 const hzToMidi = f => 69 + 12 * Math.log2(f / 440);
 const midiToHz = m => 440 * Math.pow(2, (m - 69) / 12);
 
@@ -75,7 +67,6 @@ function filtfilt(x, type, f, order = 4) {
   const z = filt(y, type, f, order); z.reverse(); return z;
 }
 const band = (x, lo, hi, order = 4) => filt(filt(x, "high", lo, order), "low", hi, order);
-const lr4 = (x, type, f) => filt(filt(x, type, f, 2), type, f, 2);
 const filt2 = (s, type, f, order = 4) => [filt(s[0], type, f, order), filt(s[1], type, f, order)];
 
 /* ------------------------------------------------------------ FFT */
@@ -1059,20 +1050,6 @@ function lufs(st) {
   const rel = L(g.reduce((a, b) => a + b, 0) / g.length) - 10; g = g.filter(v => L(v) > rel);
   return L(g.reduce((a, b) => a + b, 0) / g.length);
 }
-/** Maximus-style: 3 bands, each squashed and saturated, summed hot. */
-function soundgoodizer(x) {
-  return x.map(c => {
-    const lo = lr4(c, "low", 120), rest = Float32Array.from(c, (v, i) => v - lo[i]), mid = lr4(rest, "low", 2500), hi = Float32Array.from(rest, (v, i) => v - mid[i]);
-    const out = zeros(c.length);
-    for (const [b, thr, att, rel, drive, lift] of [[lo, -20, 10, 90, 1.6, 0], [mid, -24, 3, 60, 1.6, 0.5], [hi, -26, 1, 40, 1.3, 0]]) {
-      const r0 = rmsDb(b), y = compress(b, thr, 4, att, rel), g = Math.pow(10, (r0 - rmsDb(y) + lift) / 20);
-      for (let i = 0; i < y.length; i++) y[i] *= g;
-      const pk = percentileAbs(y, 0.999) || 1;
-      for (let i = 0; i < y.length; i++) out[i] += Math.tanh(drive * y[i] / pk) * pk / drive;
-    }
-    return out;
-  });
-}
 function clipOs(x, drive = 1) { return x.map(c => { const up = resample(c, SR, SR * 2); for (let i = 0; i < up.length; i++) up[i] = Math.tanh(drive * up[i]) / drive; const d = resample(up, SR * 2, SR); const o = zeros(c.length); o.set(d.subarray(0, c.length)); return o; }); }
 /** Lookahead limiter on 2x-oversampled peaks, so true peak stays under the ceiling. */
 function brickwall(x, ceilDb = -0.3, look = 0.0015) {
@@ -1138,11 +1115,9 @@ async function master(layers, meta, masks, mixOpts = {}, progress = () => {}) {
     log("  match EQ (dB @ 31..16k): " + gains.map(g => g.toFixed(1)).join(" "));
   }
   progress(0.2); await tick();
-  const sg = soundgoodizer(mix);
-  if (mixOpts.matchEq ?? DEFAULTS.matchEq) matchEq(sg, 1, 4);            // saturation adds mids/air back; trim them again progress(0.5); await tick();
   const target = mixOpts.targetLufs ?? DEFAULTS.targetLufs;
-  const run = g => brickwall(brickwall(clipOs(sg.map(c => Float32Array.from(c, v => v * Math.pow(10, g / 20))), 1), -0.8), -0.3);
-  let g = target - lufs(sg), out = null;
+  const run = g => brickwall(brickwall(clipOs(mix.map(c => Float32Array.from(c, v => v * Math.pow(10, g / 20))), 1), -0.8), -0.3);
+  let g = target - lufs(mix), out = null;
   for (let k = 0; k < 3; k++) { out = run(g); const l = lufs(out); if (Math.abs(target - l) < 0.15) break; g += target - l; progress(0.5 + 0.15 * (k + 1)); await tick(); }
   const end = Math.min(N, Math.round((meta.OB0 + meta.N_BARS * meta.BAR + 0.5) * SR));
   out = out.map(c => c.slice(0, end));
