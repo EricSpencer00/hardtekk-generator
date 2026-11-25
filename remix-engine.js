@@ -659,19 +659,22 @@ async function analyzePhrases(stems, an, progress = () => {}) {
   return { all, list, hookRuns: hookRuns.map(r => r.map(p => p.i)), hook: { how, conf }, notes, P0 };
 }
 /** The bass root for the source span [a, b) of a phrase: the song's bass note sounding longest there (>= 35% of
- *  the span), else the backing's triad root, else the tonic of the phrase's best-fit key; a root outside the
- *  phrase's own pitch set (chroma >= half its peak) is not taken. */
+ *  the span), else the backing's triad root, else the tonic of the phrase's best-fit key, else the span's
+ *  strongest pitch class. A root outside the span's own pitch set (vocal + backing chroma >= half its peak
+ *  there; the phrase's when the span is too short to tell) is not taken. */
 function rootAt(p, notes, a, b) {
   a = Math.max(a, p.bar0); b = Math.min(b, p.t1); if (b - a < 0.25 * p.P) { a = p.bar0; b = p.t1; }
+  const c = new Array(12).fill(0), v = new Array(12).fill(0);
+  for (let j = Math.max(0, Math.floor((a - p.bar0) / p.P)); j < Math.min(p.kb, Math.ceil((b - p.bar0) / p.P)); j++) p.tc[j].forEach((x, k) => { c[k] += x; v[k] += x + p.vc[j][k]; });
+  const mx = Math.max(...v), set = mx > 0 ? v.map((x, k) => x >= 0.5 * mx ? k : -1).filter(k => k >= 0) : p.set;
   const cov = new Float64Array(12);
   for (const n of notes) { if (n.e <= a) continue; if (n.s >= b) break; cov[pcOf(n.m)] += Math.min(n.e, b) - Math.max(n.s, a); }
   let pc = 0; for (let k = 1; k < 12; k++) if (cov[k] > cov[pc]) pc = k;
-  if (cov[pc] >= 0.35 * (b - a) && p.set.includes(pc)) return { pc, how: "bass", conf: cov[pc] / (b - a) };
-  const c = new Array(12).fill(0);
-  for (let j = Math.max(0, Math.floor((a - p.bar0) / p.P)); j < Math.min(p.kb, Math.ceil((b - p.bar0) / p.P)); j++) p.tc[j].forEach((v, k) => c[k] += v);
+  if (cov[pc] >= 0.35 * (b - a) && set.includes(pc)) return { pc, how: "bass", conf: cov[pc] / (b - a) };
   const t = triadRoot(c);
-  if (c.some(v => v > 0) && p.set.includes(t.root)) return { pc: t.root, how: "chord", conf: t.s / (Math.hypot(...c) || 1) };
-  return { pc: p.key.tonic, how: "key", conf: p.key.r };
+  if (c.some(x => x > 0) && set.includes(t.root)) return { pc: t.root, how: "chord", conf: t.s / (Math.hypot(...c) || 1) };
+  if (set.includes(p.key.tonic)) return { pc: p.key.tonic, how: "key", conf: p.key.r };
+  return mx > 0 ? { pc: v.indexOf(mx), how: "strongest", conf: mx / v.reduce((x, y) => x + y, 0) } : { pc: p.key.tonic, how: "key", conf: p.key.r };
 }
 
 /* ------------------------------------------------------------ arrangement */
