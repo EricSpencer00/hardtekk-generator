@@ -355,14 +355,216 @@ def structure(render, song):
     return out
 
 
+def ref_hook_spans(y):
+    """Independent hook: the loudest segment that repeats (Foote novelty segments of beat-synced chroma+MFCC,
+    chroma similarity > 0.95 to it and loudness > 0.7 of the loudest), as song-time spans."""
+    env = librosa.onset.onset_strength(y=librosa.effects.percussive(y, margin=2), sr=SR, hop_length=512)
+    _, beats = librosa.beat.beat_track(onset_envelope=env, sr=SR, hop_length=512, units="frames")
+    C = librosa.util.sync(librosa.feature.chroma_cqt(y=y, sr=SR, hop_length=512), beats, pad=False)
+    M = librosa.util.sync(librosa.feature.mfcc(y=y, sr=SR, hop_length=512, n_mfcc=13), beats, pad=False)
+    F = np.vstack([librosa.util.normalize(C, axis=0), librosa.util.normalize(M, axis=0)])
+    Fn = F / (np.linalg.norm(F, axis=0) + 1e-9); SSM = Fn.T @ Fn
+    L = 16; g = np.outer(np.r_[-np.ones(L), np.ones(L)], np.r_[-np.ones(L), np.ones(L)])
+    nov = np.array([np.sum(SSM[i - L:i + L, i - L:i + L] * g) if L <= i < len(SSM) - L else 0 for i in range(len(SSM))])
+    bnd = []
+    for i in np.argsort(-nov):
+        if nov[i] <= 0 or len(bnd) >= max(2, len(beats) // 32): break
+        if all(abs(i - j) >= 16 for j in bnd): bnd.append(i)
+    bnd = sorted([0] + bnd); bt = librosa.frames_to_time(beats, sr=SR, hop_length=512)
+    seg = [(bnd[i], bnd[i + 1] if i + 1 < len(bnd) else len(bt) - 1) for i in range(len(bnd))]
+    rms = librosa.util.sync(librosa.feature.rms(y=y, hop_length=512), beats)[0]
+    chs = [librosa.util.normalize(C[:, a:b].mean(1)) if b > a else np.zeros(12) for a, b in seg]
+    sim = np.array([[float(chs[i] @ chs[j]) for j in range(len(seg))] for i in range(len(seg))])
+    loud = np.array([rms[a:b].mean() if b > a else 0 for a, b in seg]); loud = loud / (loud.max() + 1e-9)
+    rep = np.array([max([sim[i, j] for j in range(len(seg)) if abs(i - j) > 1] or [0]) for i in range(len(seg))])
+    h = int(np.argmax(loud * rep))
+    return [(bt[seg[i][0]], bt[min(seg[i][1], len(bt) - 1)]) for i in range(len(seg)) if i == h or (sim[h, i] > 0.95 and loud[i] > 0.7)]
+
+
+def onsets_refined(x, strong=True):
+    """Onsets as the engine defines them: spectral-flux peaks moved to the steepest rise of a 2 ms envelope in the
+    40 ms before; `strong` keeps those at or above the median peak strength."""
+    env = librosa.onset.onset_strength(y=x, sr=SR, hop_length=128)
+    fr = librosa.onset.onset_detect(onset_envelope=env, sr=SR, hop_length=128, backtrack=False)
+    if strong and len(fr): fr = fr[env[fr] >= np.median(env[fr])]
+    from scipy.signal import butter as bt_
+    e = np.convolve(np.abs(sosfilt(bt_(2, 60, "hp", fs=SR, output="sos"), x)), np.ones(88) / 88, "same")
+    out = []
+    for f in fr:
+        c = f * 128; a, b = max(1, c - int(0.04 * SR)), min(len(e) - 1, c + int(0.01 * SR))
+        out.append((a + int(np.argmax(np.diff(e[a - 1:b])))) / SR if b > a else c / SR)
+    return np.array(out)
+
+
+def card(render, song, stems):
+    """Old (continuous) or new (chop) render of tools/remix_node.js against the original song and its true
+    (Demucs) stems: timing, stretch, harmony, hook, leakage, kick/bass overlap, loudness, form."""
+    import soundfile as sf
+    from scipy.signal import sosfiltfilt
+    base = render.rsplit(".", 1)[0]; d = json.load(open(base + ".json")); an = d["analysis"]
+    chop = d.get("mode") == "chop"; c = d.get("chop") or {}
+    BEAT, OB0 = d["BEAT"], d["OB0"]; BAR, STEP = 4 * BEAT, BEAT / 4
+    semis = c.get("semis", an.get("semis", 4)); rate = 2 ** (semis / 12)
+    out, pct = {}, lambda v: f"{100 * v:.0f}%"
+    # render time -> song time, and song time -> render times
+    if chop:
+        P = c["placed"]
+        def to_render(u):
+            return [OB0 + p["bar"] * BAR + (u - p["bar0"]) * p["alpha"] / rate for p in P if p["s0"] <= u <= p["t1"]]
+        def to_song(t):
+            for p in P:
+                a = OB0 + p["bar"] * BAR
+                if a <= t < a + p["bars"] * BAR: return p["bar0"] + (t - a) * rate / p["alpha"]
+    else:
+        SB0, warp = an["b0"] / rate, an.get("warp")
+        ws, wd = (np.array(warp["src"]), np.array(warp["dst"])) if warp else (None, None)
+        def w2s(w):  # warped (rigid) time -> song time
+            if not warp: return w
+            r = (ws[-1] - ws[0]) / (wd[-1] - wd[0])
+            return ws[0] + (w - wd[0]) * r if w < wd[0] else ws[-1] + (w - wd[-1]) * r if w > wd[-1] else float(np.interp(w, wd, ws))
+        def s2w(u):
+            if not warp: return u
+            r = (wd[-1] - wd[0]) / (ws[-1] - ws[0])
+            return wd[0] + (u - ws[0]) * r if u < ws[0] else wd[-1] + (u - ws[-1]) * r if u > ws[-1] else float(np.interp(u, ws, wd))
+        def to_render(u):
+            v = s2w(u) / rate; o = []
+            for b in d["blocks"]:
+                a = SB0 + b["src"] * BAR
+                if a <= v < a + b["n"] * BAR: o.append(OB0 + b["out"] * BAR + v - a)
+            return o
+        def to_song(t):
+            for b in d["blocks"]:
+                a = OB0 + b["out"] * BAR
+                if a <= t < a + b["n"] * BAR: return w2s((t - a + SB0 + b["src"] * BAR) * rate)
+    # 1. grid: every drum hit on the remix's 16th grid, exactly
+    ev = [h[0] for h in d["hits"]] + ([OB0 + e["s"] * STEP for k in ("bass", "snare", "hat", "bell") for e in d["score"].get(k, [])] if "score" in d else [])
+    res = [abs(t - (OB0 + round((t - OB0) / STEP) * STEP)) * SR for t in ev]
+    out["drum_hits_off_grid_samples_max"] = f"{max(res):.3f} ({len(ev)} hits)"
+    assert max(res) < 0.5, "a drum hit is off the grid"
+    # 2. the song's strong vocal onsets (true vocal stem) where they play in the remix, against the 16th grid
+    vt, _ = librosa.load(os.path.join(stems, "vocals.wav"), sr=SR, mono=True)
+    on = onsets_refined(vt)
+    errs = []
+    for u in on:
+        for t in to_render(u):
+            if t < OB0 + d["blocks"][-1]["out"] * BAR + d["blocks"][-1]["n"] * BAR: errs.append(abs(t - (OB0 + round((t - OB0) / STEP) * STEP)))
+    errs = 1000 * np.array(errs)
+    out["vocal_onset_grid_ms"] = f"median {np.median(errs):.1f}, p90 {np.percentile(errs, 90):.1f}, <=15 ms {pct(np.mean(errs <= 15))} (n {len(errs)}; chance median {1000 * STEP / 4:.1f})"
+    # the ceiling: the same onsets against the song's own 16th grid (the engine's analysis: tempo, downbeat, warp)
+    S16 = 60 / an["bpm"] / 4; sw = (lambda u: float(np.interp(u, an["warp"]["src"], an["warp"]["dst"]))) if an.get("warp") else (lambda u: u)
+    own = 1000 * np.array([abs((sw(u) - an["b0"]) / S16 - round((sw(u) - an["b0"]) / S16)) * S16 for u in on])
+    out["song_own_vocal_onset_grid_ms"] = f"median {np.median(own):.1f}, p90 {np.percentile(own, 90):.1f}, <=15 ms {pct(np.mean(own <= 15))} (chance median {1000 * S16 / 4:.1f})"
+    if chop:
+        se = []
+        for p in P:  # the true onset nearest the phrase's onset, against where the engine meant it (bar line + pickup)
+            k = np.argmin(np.abs(on - p["on"]))
+            if abs(on[k] - p["on"]) < 0.06: se.append(abs(OB0 + p["bar"] * BAR + (on[k] - p["bar0"]) * p["alpha"] / rate - (OB0 + p["bar"] * BAR + p["q"] * BEAT * c["m"])))
+        se = 1000 * np.array(se)
+        out["phrase_start_vs_bar_ms"] = f"median {np.median(se):.1f}, p90 {np.percentile(se, 90):.1f} (n {len(se)} of {len(P)})" if len(se) else "n/a"
+        al = np.array([p["alpha"] for p in P]); u = np.array(sorted({p["i"]: p["alpha"] for p in P}.values()))
+        out["stretch"] = f"min {al.min():.2f} median {np.median(al):.2f} max {al.max():.2f}; outside +-12%: {pct(np.mean(np.abs(al - 1) > 0.12))} of placements, {pct(np.mean(np.abs(u - 1) > 0.12))} of phrases"
+    # 3. harmony: each bar's bass/kick note (sounding pitch - shift) against the song's own pitch set there
+    y, _ = librosa.load(song, sr=SR, mono=True)
+    C = librosa.feature.chroma_cqt(y=y, sr=SR, hop_length=512); ct = librosa.frames_to_time(np.arange(C.shape[1]), sr=SR, hop_length=512)
+    yb, _ = librosa.load(os.path.join(stems, "bass.wav"), sr=11025, mono=True)
+    f0 = librosa.yin(yb, fmin=30, fmax=250, sr=11025, frame_length=2048, hop_length=256)
+    br = librosa.feature.rms(y=yb, frame_length=2048, hop_length=256)[0][:len(f0)]; bt_ = librosa.frames_to_time(np.arange(len(f0)), sr=11025, hop_length=256)
+    def pset(a, b):
+        m = C[:, (ct >= a) & (ct < b)]
+        if not m.shape[1]: return None
+        v = m.mean(1); return set(np.where(v >= 0.5 * v.max())[0])
+    def bass_pc(a, b):
+        k = (bt_ >= a) & (bt_ < b) & (br > 0.1 * br.max())
+        if k.sum() < 4: return None
+        h = np.bincount(np.round(12 * np.log2(f0[k] / 440) + 69).astype(int) % 12, weights=br[k], minlength=12); return int(np.argmax(h))
+    spans = []
+    if chop:
+        for r in c["roots"]:
+            if r.get("src") and not r["carried"] and r["how"] != "next drop": spans.append(((r["pc"] - semis) % 12, *r["src"]))
+    else:
+        NM = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+        for b in d["blocks"]:
+            if b["kind"] != "drop": continue
+            for q in range(b["n"]):
+                t0 = OB0 + (b["out"] + q) * BAR; hs = [h for h in d["hits"] if t0 <= h[0] < t0 + BAR]
+                a, e = to_song(t0 + 1e-4), to_song(t0 + BAR - 1e-4)
+                if hs and a is not None and e is not None: spans.append(((NM.index(hs[0][1]) - semis) % 12, a, e))
+    ins, same, n_ = [], [], []
+    for pc, a, b in spans:
+        s = pset(a, b)
+        if s is not None: ins.append(pc in s); n_.append(len(s))
+        bp = bass_pc(a, b)
+        if bp is not None: same.append(pc == bp)
+    out["bass_root_in_song_pitch_set"] = f"{pct(np.mean(ins))} of {len(ins)} bars (chance {pct(np.mean(n_) / 12)})" if ins else "n/a"
+    out["bass_root_equals_true_bass"] = f"{pct(np.mean(same))} of {len(same)} bars" if same else "n/a"
+    # 4. hook: drop bars carrying the engine's hook, and drop bars whose vocal comes from the independent hook
+    hs = ref_hook_spans(y); drop_bars = [(b["out"] + q) for b in d["blocks"] if b["kind"] == "drop" for q in range(b["n"])]
+    if chop:
+        hb = {p["bar"] + k for p in P if p["hook"] and p["kind"] == "drop" for k in range(p["bars"])}
+        out["drop_bars_engine_hook"] = pct(len([b for b in drop_bars if b in hb]) / max(1, len(drop_bars)))
+    ref = []
+    for bar in drop_bars:
+        us = [to_song(OB0 + bar * BAR + (k + 0.5) * BEAT) for k in range(4)]; us = [u for u in us if u is not None]
+        if us: ref.append(np.mean([any(a <= u < e for a, e in hs) for u in us]) >= 0.5)
+    out["drop_bars_in_reference_hook"] = f"{pct(np.mean(ref))} of {len(ref)} drop bars with vocal ({len(drop_bars)} drop bars)" if ref else "n/a"
+    # 5. leakage of the song's drums+bass into the chopped vocal (in-engine separation, measured with --truth)
+    if c.get("leak"):
+        L = c["leak"]; vl, _ = sf.read(base + "_vocals.wav"); mx, _ = sf.read(render)
+        sh = L["db"][1] / max(L["vox"][1], 1e-12); rel = 10 * np.log10(sh * np.mean(vl ** 2) / np.mean(mx ** 2) + 1e-12)
+        out["leak_drums_bass_in_vocal"] = f"{pct(sh)} of vocal energy ({pct(L['db'][0] / max(L['vox'][0], 1e-12))} before the 300 Hz high-pass), {rel:.1f} dB vs the mix; high-pass keeps {pct(L['v'][1] / max(L['v'][0], 1e-12))} of what the separator kept of the true vocal"
+        if L["bed"]: out["leak_drums_bass_in_backing"] = pct(L["bedDb"] / L["bed"])
+    # 6. kick vs bass: share of the kick's sounding time (<150 Hz) that the bass also sounds
+    if os.path.exists(base + "_kick.wav"):
+        sos = butter(4, 150, "lp", fs=SR, output="sos"); e = []
+        for k_ in ("kick", "bass808"):
+            x = sosfiltfilt(sos, sf.read(f"{base}_{k_}.wav")[0].mean(1)); n = len(x) // 441 * 441
+            e.append(np.sqrt((x[:n].reshape(-1, 441) ** 2).mean(1)))
+        ka, ba = e[0] > 0.1 * np.percentile(e[0], 99), e[1] > 0.1 * np.percentile(e[1], 99)
+        out["kick_bass_overlap"] = pct(np.mean(ba[ka]))
+    mx, _ = sf.read(render)
+    out["lufs_peak_nan"] = f"{lufs_integrated(mx.mean(1), SR):.2f} LUFS, peak {20 * np.log10(np.abs(mx).max() + 1e-12):.2f} dBFS, NaN {bool(np.isnan(mx).any())}"
+    if d.get("times"): out["render_s"] = " ".join(f"{k} {v:.1f}" for k, v in d["times"].items())
+    # 7. form: element entries/exits (kick, bass, backbeat, hats) off the 8-bar lines, outside fills; phrases cut
+    nb = d["blocks"][-1]["out"] + d["blocks"][-1]["n"]; fills = d.get("fills") or [False] * nb
+    lanes = {"kick": [int((h[0] - OB0) / BAR + 1e-6) for h in d["hits"]]}
+    if "score" in d:
+        sc = d["score"]
+        lanes.update(bass=[e["s"] // 16 for e in sc["bass"]], backbeat=[e["s"] // 16 for e in sc["snare"] if e["s"] % 16 in (4, 12) and abs(e.get("g", 0.22) - 0.22) < 1e-6], hat=[e["s"] // 16 for e in sc["hat"]])
+    bad = tot = 0
+    for k, bars in lanes.items():
+        on_ = [i in set(bars) for i in range(nb)]; prev = None
+        for i in range(nb):
+            if fills[i]: continue
+            if prev is not None and on_[i] != prev:
+                tot += 1; bad += i % 8 != 0
+            prev = on_[i]
+    out["element_changes_off_8bar_lines"] = f"{bad} of {tot} ({'/'.join(lanes)})"
+    if chop:
+        cut = 0
+        for p in P:
+            blk = next(b for b in d["blocks"] if b["out"] <= p["bar"] < b["out"] + b["n"])
+            cut += p["bar"] + p["bars"] > blk["out"] + blk["n"]
+        out["phrases_cut"] = f"{cut} of {len(P)}"
+    return out
+
+
 def main():
     p = argparse.ArgumentParser(description="hardtekk render report card")
     p.add_argument("wav", nargs="?", help="render to grade")
     p.add_argument("--bpm", type=float, default=None, help="target BPM (else detected)")
     p.add_argument("--reference", help="measure a real hardtekk track and save it as the target profile")
     p.add_argument("--song", help="the original song: score the remix-app render's beat, downbeat, cuts, hook, kick/bass and key against it")
+    p.add_argument("--stems", help="with --song: the song's true stems (Demucs) for the full card (timing, harmony, hook, form)")
+    p.add_argument("--json", action="store_true", help="with --stems: print the card as JSON")
     a = p.parse_args()
 
+    if a.song and a.stems:
+        c = card(a.wav, a.song, a.stems)
+        if a.json: print(json.dumps(c)); return
+        print(f"\nCARD {a.wav}  (reference: {os.path.basename(a.song)})")
+        for k, v in c.items():
+            print(f"  {k:32s} {v}")
+        return
     if a.song:
         print(f"\nSTRUCTURE {a.wav}  (reference: {os.path.basename(a.song)})")
         for k, v in structure(a.wav, a.song).items():
