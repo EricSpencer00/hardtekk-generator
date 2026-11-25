@@ -816,7 +816,7 @@ function kickSettle(y) {
 /* ------------------------------------------------------------ defaults */
 const DEFAULTS = {
   mode: "chop",             // "chop": the vocal's phrases on a fixed groove | "continuous": the whole song sped up under new drums
-  bpm: 175,                 // chop mode's tempo
+  bpm: "auto",              // chop mode's tempo: "auto" (tempoFit) or a number
   semis: 4,                 // pitch up (chop) / speed up (continuous: +4 st = 140 -> 176 BPM, v10 B)
   pattern: "alt",           // drops: four on the floor, then x x xxx (2-bar cycle)
   h16: true,                // 16th hats in the drops
@@ -986,12 +986,27 @@ const FORM = { full: "intro:8, build:8, drop:16, break:8, build:8, drop:16, outr
 /** Chop mode: a fixed-tempo groove from the templates, with the song's vocal phrases cut out, each
  *  stretched (pitch kept) by its own tempo onto whole beats and started on a bar line. The song's drums and
  *  bass are not used; its backing plays (high-passed, ducked) in breaks and builds only. */
+/** Chop mode's tempo and pitch shift. One song beat becomes m remix beats (1/2, 1 or 2); the pitch shift's
+ *  resample already speeds the vocal up by R, so the stretch left for WSOLA is m x (60 / bpm) x R / (song beat).
+ *  With bpm "auto": the tempo in 150-200 BPM and the shift within 2 st of the asked one that bring the median
+ *  phrase's stretch nearest 1, where a semitone away from the asked shift weighs as 3% stretch and the
+ *  distance from 175 BPM as a twentieth of its log. With a number: that tempo, the asked shift. */
+function tempoFit(Ps, P0, bpm, semis) {
+  const Pm = Ps.slice().sort((a, b) => a - b)[Ps.length >> 1] || P0, auto = bpm === "auto" || !(+bpm > 0);
+  let best = null;
+  for (let s = semis - (auto ? 2 : 0); s <= semis + (auto ? 2 : 0); s++) for (const m of [0.5, 1, 2]) {
+    const R = Math.pow(2, s / 12), b = auto ? Math.min(200, Math.max(150, 60 * m * R / Pm)) : +bpm, a = m * 60 / b * R / Pm;
+    const cost = Math.abs(Math.log(a)) + 0.03 * Math.abs(s - semis) + 0.05 * Math.abs(Math.log(b / 175));
+    if (!best || cost < best.cost) best = { bpm: b, semis: s, m, cost };
+  }
+  return best;
+}
+
 async function buildChop(stems, samples, an, o, progress, cache) {
   const ph = cache.phrases || (cache.phrases = await analyzePhrases(stems, an, p => progress(0.4 * p)));
+  const fit = tempoFit(ph.list.map(p => p.P), ph.P0, o.bpm, o.semis), m = fit.m, asked = { bpm: o.bpm, semis: o.semis };
+  o = { ...o, bpm: fit.bpm, semis: fit.semis };
   const T = 60 / o.bpm, BEAT = T, BAR = 4 * T, R = Math.pow(2, o.semis / 12), OB0 = 0.05;
-  // one beat of the song becomes m beats of the remix (m = 1/2, 1, 2: whichever needs the least stretch)
-  const Pm = ph.list.map(p => p.P).sort((a, b) => a - b)[ph.list.length >> 1] || ph.P0;
-  const m = [0.5, 2].reduce((b, x) => Math.abs(Math.log(x * T * R / Pm)) < Math.abs(Math.log(b * T * R / Pm)) ? x : b, 1);
   const use = ph.list.map(p => ({ ...p, alpha: m * T * R / p.P })).filter(p => Math.abs(Math.log(p.alpha)) <= Math.log(1.42));
   const out = (p, t) => (t - p.bar0) * p.alpha / R;                    // source time -> remix seconds after the phrase's bar line
   for (const p of use) p.bars = Math.max(1, Math.ceil((out(p, p.t1) - 0.25 * BEAT) / BAR));
@@ -1070,11 +1085,11 @@ async function buildChop(stems, samples, an, o, progress, cache) {
   const sweeps = blocks.filter(b => b.kind === "build").map(b => [Math.round(ot(b.out + b.n - 2) * SR), Math.round(ot(b.out + b.n) * SR), 30, 800, 1.5, "hp"]);
   const { voxComp, act } = vocalBus(vox, dropM);
   const A = { blocks, barInfo, N, N_BARS, BEAT, BAR, OB0, ot, drumM, dropM, bedPre: bed, bedPres: bed.map(c => band(c, 900, 4200)), voxComp, act, sweeps };
-  const chop = { bpm: o.bpm, semis: o.semis, m, hook: ph.hook, leak, inEngine: !!stems.inEngine,
+  const chop = { bpm: o.bpm, semis: o.semis, m, asked, hook: ph.hook, leak, inEngine: !!stems.inEngine,
     phrases: ph.all.map(p => ({ i: p.i, t0: p.t0, t1: p.t1, on: p.on, q: p.q, P: p.P, vf: p.vf, gridOk: p.gridOk, used: byId.has(p.i), hook: !!byId.get(p.i)?.hook, alpha: byId.get(p.i)?.alpha, rep: p.rep, nrep: p.nrep, loud: p.loud, score: p.score })),
     placed: placed.map(pl => ({ i: pl.p.i, bar: pl.bar, bars: pl.p.bars, kind: pl.block.kind, alpha: pl.p.alpha, bar0: pl.p.bar0, on: pl.p.on, s0: pl.p.s0, t1: pl.p.t1, q: pl.p.q, hook: pl.p.hook })),
     roots: roots.map(r => ({ pc: r.pc, how: r.how, src: r.src, phrase: r.phrase, carried: !!r.carried })) };
-  log(`  chop: ${o.bpm} BPM, 1 song beat = ${m} beat(s), stretch ${use.length ? use.map(p => p.alpha).sort((a, b) => a - b).filter((_, k, a) => k === 0 || k === a.length - 1).map(v => v.toFixed(2)).join("-") : "-"}, ${placed.length} phrases placed; ` + blocks.map(b => `${b.name}:${b.n}`).join(" "));
+  log(`  chop: ${o.bpm.toFixed(1)} BPM, ${o.semis >= 0 ? "+" : ""}${o.semis} st, 1 song beat = ${m} beat(s), stretch ${use.length ? use.map(p => p.alpha).sort((a, b) => a - b).filter((_, k, a) => k === 0 || k === a.length - 1).map(v => v.toFixed(2)).join("-") : "-"}, ${placed.length} phrases placed; ` + blocks.map(b => `${b.name}:${b.n}`).join(" "));
   const ctx = { mode: "chop", tuneCents: an.tuneCents || 0, A, plan, scales: [], key: `${NAMES[keyPc]} ${an.key.mode}`, scale: [], arrangement: blocks.map(b => `${b.kind}:${b.n}`).join(", "), o, chop };
   progress(0.9); await tick();
   const r = mixScore(ctx, score, samples, o);
