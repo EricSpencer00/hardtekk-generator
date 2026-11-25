@@ -441,19 +441,84 @@ def card(render, song, stems):
     res = [abs(t - (OB0 + round((t - OB0) / STEP) * STEP)) * SR for t in ev]
     out["drum_hits_off_grid_samples_max"] = f"{max(res):.3f} ({len(ev)} hits)"
     assert max(res) < 0.5, "a drum hit is off the grid"
-    # 2. the song's strong vocal onsets (true vocal stem) where they play in the remix, against the 16th grid
+    # 2. pocket: each strong vocal onset (true vocal stem) where it plays in the remix, its phase in the remix beat
+    #    minus m x its phase in the song's own beat. The song's beat near each onset: a straight grid fitted to the
+    #    true drums' kick onsets within +-8 beats (the onsets under 5 kHz when the kick is not significant), period
+    #    within 1.5% of the tempo where all drum onsets cluster on beat and 8th. 0 = the vocal sits against our kick
+    #    as it sat against the song's kick. Circular, in ms of the remix beat.
     vt, _ = librosa.load(os.path.join(stems, "vocals.wav"), sr=SR, mono=True)
     on = onsets_refined(vt)
-    errs = []
+    dr, _ = librosa.load(os.path.join(stems, "drums.wav"), sr=SR, mono=True)
+    da, dk, dm_ = onsets_refined(dr, strong=False), onsets_refined(sosfiltfilt(butter(4, 150, "lp", fs=SR, output="sos"), dr), strong=False), onsets_refined(sosfiltfilt(butter(4, 5000, "lp", fs=SR, output="sos"), dr), strong=False)
+    R_ = lambda t, P: np.abs(np.exp(2j * np.pi * np.outer(1 / np.atleast_1d(P), t)).mean(1))
+    bp = np.arange(100, 200, 0.02); P0 = 60 / bp[np.argmax(R_(da, 60 / bp) + R_(da, 30 / bp))]
+    # windows of +-8 beats every 4 beats: period and 16th phase from all onsets (beat+8th+16th, ok beyond 2 SE), the
+    # beat = the 16th with most kick (+ half snare band) onsets, chosen through the song by Viterbi (0.3 per 16th jumped)
+    at = lambda ph, P, t: ph + np.round((t - ph) / P) * P
+    win = []
+    for cc in np.arange(0, len(dr) / SR, 4 * P0):
+        t = da[np.abs(da - cc) <= 8 * P0]
+        if len(t) < 8: continue
+        Ps = P0 * (1 + np.arange(-0.015, 0.0151, 0.0005)); Pw = Ps[int(np.argmax(R_(t, Ps) + R_(t, Ps / 2) + R_(t, Ps / 4)))]
+        z = np.exp(2j * np.pi * 4 * t / Pw).mean()
+        if abs(z) <= 2 / np.sqrt(len(t)): continue
+        p16 = (np.angle(z) / (2 * np.pi) % 1) * Pw / 4; hit = np.zeros(4)
+        for o, w in ((dk, 1.0), (dm_, 0.5)):
+            x = (((o[np.abs(o - cc) <= 8 * P0] - p16) / Pw) % 1) * 4; ok = np.abs(x - np.round(x)) < 0.25
+            np.add.at(hit, (np.round(x[ok]) % 4).astype(int), w)
+        win.append((cc, Pw, [at(p16 + j * Pw / 4, Pw, cc) for j in range(4)], hit / max(hit.sum(), 1e-9)))
+    d16 = lambda x, y, P: abs(int(np.round(4 * ((((x - y) / P) + 0.5) % 1 - 0.5))))
+    V = [np.array(w[3]) for w in win]; back = []
+    for i in range(1, len(win)):
+        (c1, P1, B1, _), (c0, P0_, B0, _) = win[i], win[i - 1]
+        tr = np.array([[V[i - 1][k] - 0.3 * d16(B1[j], at(B0[k], P0_, c1), P1) for k in range(4)] for j in range(4)])
+        back.append(tr.argmax(1)); V[i] = V[i] + tr.max(1)
+    beats_w = [None] * len(win)
+    if win:
+        j = int(np.argmax(V[-1]))
+        for i in range(len(win) - 1, -1, -1):
+            beats_w[i] = win[i][2][j]
+            if i: j = int(back[i - 1][j])
+    cw = np.array([w[0] for w in win])
+    def phase_at(u):
+        if not len(cw): return np.nan
+        i = int(np.argmin(np.abs(cw - u)))
+        if abs(cw[i] - u) > 4 * P0: return np.nan
+        P = win[i][1]; return ((u - at(beats_w[i], P, u)) / P) % 1
+    # our beat is where our kick is heard: the steepest rise of the kick layer's 1 ms energy near each hit
+    ko = 0.0
+    if os.path.exists(base + "_kick.wav"):
+        import soundfile as sf_
+        kx = sf_.read(base + "_kick.wav")[0].mean(1); ke = np.convolve(kx ** 2, np.ones(44) / 44, "same"); offs = []
+        for h in d["hits"][::5]:
+            i = int(round(h[0] * SR)); seg = ke[max(0, i - 1320):i + 1320]
+            if len(seg) == 2640: offs.append((np.argmax(np.diff(seg)) - 1320) / SR)
+        ko = float(np.median(offs)) if offs else 0.0
+        out["kick_attack_ms"] = f"{1000 * ko:+.1f} from the grid"
+    m = c.get("m", 1) if chop else 1
+    wrap = lambda x: (x + 0.5) % 1 - 0.5
+    end = OB0 + d["blocks"][-1]["out"] * BAR + d["blocks"][-1]["n"] * BAR
+    pk, per_pl, nref = [], {}, 0
     for u in on:
-        for t in to_render(u):
-            if t < OB0 + d["blocks"][-1]["out"] * BAR + d["blocks"][-1]["n"] * BAR: errs.append(abs(t - (OB0 + round((t - OB0) / STEP) * STEP)))
-    errs = 1000 * np.array(errs)
-    out["vocal_onset_grid_ms"] = f"median {np.median(errs):.1f}, p90 {np.percentile(errs, 90):.1f}, <=15 ms {pct(np.mean(errs <= 15))} (n {len(errs)}; chance median {1000 * STEP / 4:.1f})"
-    # the ceiling: the same onsets against the song's own 16th grid (the engine's analysis: tempo, downbeat, warp)
-    S16 = 60 / an["bpm"] / 4; sw = (lambda u: float(np.interp(u, an["warp"]["src"], an["warp"]["dst"]))) if an.get("warp") else (lambda u: u)
-    own = 1000 * np.array([abs((sw(u) - an["b0"]) / S16 - round((sw(u) - an["b0"]) / S16)) * S16 for u in on])
-    out["song_own_vocal_onset_grid_ms"] = f"median {np.median(own):.1f}, p90 {np.percentile(own, 90):.1f}, <=15 ms {pct(np.mean(own <= 15))} (chance median {1000 * S16 / 4:.1f})"
+        b = phase_at(u)
+        if np.isnan(b): continue
+        nref += 1
+        if chop:
+            for j, p in enumerate(P):
+                if p["s0"] <= u <= p["t1"]:
+                    t = OB0 + p["bar"] * BAR + (u - p["bar0"]) * p["alpha"] / rate
+                    if t < end: e = wrap((t - OB0 - ko) / BEAT - m * b); pk.append(e); per_pl.setdefault(j, []).append((u, e))
+        else:
+            for t in to_render(u):
+                if t < end: pk.append(wrap((t - OB0 - ko) / BEAT - b))
+    pa = np.abs(np.array(pk)) * BEAT * 1000
+    if not len(pa): pa = np.array([np.nan])
+    out["pocket_ms"] = f"median {np.median(pa):.1f}, p90 {np.percentile(pa, 90):.1f}, <=10 ms {pct(np.mean(pa <= 10))}, <=20 ms {pct(np.mean(pa <= 20))} (n {len(pa)}; {nref} of {len(on)} onsets have a song beat; chance median {BEAT * 250:.0f})"
+    if per_pl:
+        disp = [round(4 * float(np.angle(np.mean(np.exp(2j * np.pi * np.array([e for _, e in v])))) / (2 * np.pi))) for v in per_pl.values()]
+        out["phrases_displaced"] = f"{sum(1 for x in disp if x)} of {len(disp)} placements by >=1 16th ({', '.join(f'{x:+d}' for x in disp if x)})"
+        dd = [abs(np.mean([e for _, e in sorted(v)[-3:]]) - np.mean([e for _, e in sorted(v)[:3]])) * BEAT * 1000 for v in per_pl.values() if len(v) >= 6]
+        if dd: out["within_phrase_drift_ms"] = f"median {np.median(dd):.1f}, p90 {np.percentile(dd, 90):.1f} (first 3 vs last 3 onsets, {len(dd)} placements)"
     if chop:
         se = []
         for p in P:  # the true onset nearest the phrase's onset, against where the engine meant it (bar line + pickup)
@@ -507,6 +572,15 @@ def card(render, song, stems):
         us = [to_song(OB0 + bar * BAR + (k + 0.5) * BEAT) for k in range(4)]; us = [u for u in us if u is not None]
         if us: ref.append(np.mean([any(a <= u < e for a, e in hs) for u in us]) >= 0.5)
     out["drop_bars_in_reference_hook"] = f"{pct(np.mean(ref))} of {len(ref)} drop bars with vocal ({len(drop_bars)} drop bars)" if ref else "n/a"
+    if chop:  # repeats: the vocal slices in time order (placed phrases, and each build's stutter hits as one slice)
+        seq = sorted([(p["bar"], p["i"]) for p in P] + [(st["bar"], f"stutter{k}") for k, st in enumerate(c.get("stutter") or [{"bar": b["out"] + b["n"] - 2, "hits": 24} for b in d["blocks"] if b["kind"] == "build"]) for _ in range(st["hits"])], key=lambda x: (x[0], str(x[1])))
+        run = best = 0; prev = None
+        for _, sl in seq: run = run + 1 if sl == prev else 1; best = max(best, run); prev = sl
+        drops = [b for b in d["blocks"] if b["kind"] == "drop"]
+        dist = [len({p["i"] for p in P if b["out"] <= p["bar"] < b["out"] + b["n"]}) for b in drops]
+        mostp = max((sum(1 for p in P if p["i"] == i) for i in {p["i"] for p in P}), default=0)
+        same = len(drops) > 1 and all([p["i"] for p in P if drops[0]["out"] <= p["bar"] < drops[0]["out"] + drops[0]["n"]] == [p["i"] for p in P if b["out"] <= p["bar"] < b["out"] + b["n"]] for b in drops[1:])
+        out["repeats"] = f"max consecutive plays of one slice {best}; distinct slices per drop {'/'.join(map(str, dist))}; most plays of one phrase {mostp}; drops identical {same}"
     # 5. leakage of the song's drums+bass into the chopped vocal (in-engine separation, measured with --truth)
     if c.get("leak"):
         L = c["leak"]; vl, _ = sf.read(base + "_vocals.wav"); mx, _ = sf.read(render)
