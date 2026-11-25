@@ -269,6 +269,59 @@ async function separate(mix, progress = () => {}, probes = {}) {
   }
   return { drums, bass, other, vocals: out.v, inEngine: true, ...(PR.length ? { probe } : {}) };
 }
+/** Stems from a neural separator: htdemucs (drums, bass, other, vocals) run on 7.8 s chunks overlapped by a
+ *  quarter and crossfaded. The graph has no FFT: the engine makes htdemucs's spectrogram of each chunk (htSpec),
+ *  `run(x, mag)` (the caller owns the runtime) returns the model's frequency branch (complex spectrogram per
+ *  source) and time branch, and the stem is time + inverse spectrogram (htISpec). x: Float32Array [2 x N];
+ *  mag: [4 x 2048 x 336] (L re, L im, R re, R im); freq: [4 x 4 x 2048 x 336]; time: [4 x 2 x N]. */
+async function separateModel(mix, run, progress = () => {}, N = 343980) {
+  const L = mix[0].length, ov = N >> 2, stride = N - ov, n = Math.max(1, Math.ceil(L / stride));
+  const out = Array.from({ length: 4 }, () => st2(L)), ws = new Float32Array(L), w = new Float32Array(N);
+  for (let i = 0; i < N; i++) w[i] = Math.min(1, i / (ov - 1), (N - 1 - i) / (ov - 1));
+  for (let c = 0; c < n; c++) {
+    const a = c * stride, e = Math.min(a + N, L), x = new Float32Array(2 * N), mag = new Float32Array(4 * HT.F * HT.T);
+    for (let ch = 0; ch < 2; ch++) { x.set(mix[ch].subarray(a, e), ch * N); htSpec(x.subarray(ch * N, (ch + 1) * N), mag, ch); }
+    const { freq, time } = await run(x, mag);
+    for (let k = 0; k < 4; k++) for (let ch = 0; ch < 2; ch++) {
+      const y = htISpec(freq, k, ch, N), o = out[k][ch], tb = (2 * k + ch) * N;
+      for (let i = 0; i < e - a; i++) o[a + i] += (y[i] + time[tb + i]) * w[i];
+    }
+    for (let i = 0; i < e - a; i++) ws[a + i] += w[i];
+    progress((c + 1) / n); await tick();
+  }
+  for (const st of out) for (const ch of st) for (let i = 0; i < L; i++) ch[i] /= Math.max(ws[i], 1e-8);
+  return { drums: out[0], bass: out[1], other: out[2], vocals: out[3] };
+}
+/* htdemucs's spectrogram: 4096-point periodic Hann, hop 1024, scaled by 1/64 (torch "normalized"), the chunk
+ * reflect-padded by 1536 (+ the rest of the last hop) and centred; frames 2..337, bins 0..2047. */
+const HT = { NF: 4096, H: 1024, F: 2048, T: 336, pad: 1536, w: hann(4096) };
+function htSpec(x, mag, ch) {
+  const { NF, H, F, T, pad, w } = HT, L = x.length, re = new Float64Array(NF), im = new Float64Array(NF);
+  const at = i => { while (i < 0 || i >= L) i = i < 0 ? -i : 2 * (L - 1) - i; return x[i]; };
+  for (let t = 0; t < T; t++) {
+    const s0 = (t + 2) * H - NF / 2 - pad;                              // first source sample of the frame
+    for (let n = 0; n < NF; n++) { re[n] = at(s0 + n) * w[n] / 64; im[n] = 0; }
+    fft(re, im);
+    for (let f = 0; f < F; f++) { mag[((2 * ch) * F + f) * T + t] = re[f]; mag[((2 * ch + 1) * F + f) * T + t] = im[f]; }
+  }
+}
+/** Inverse of htSpec for source k, channel ch of the model's frequency branch: overlap-add of the frames,
+ *  divided by the summed squared window, as torch.istft. Returns the chunk's N samples. */
+function htISpec(freq, k, ch, N) {
+  const { NF, H, F, T, pad, w } = HT, re = new Float64Array(NF), im = new Float64Array(NF), o = (T + 3) * H + NF;
+  const y = new Float64Array(o), den = new Float64Array(o), b = k * 4 + 2 * ch;
+  for (let t = 0; t < T; t++) {
+    re.fill(0); im.fill(0);
+    for (let f = 0; f < F; f++) { re[f] = freq[(b * F + f) * T + t] * 64; im[f] = freq[((b + 1) * F + f) * T + t] * 64; }
+    for (let f = 1; f < F; f++) { re[NF - f] = re[f]; im[NF - f] = -im[f]; }
+    ifft(re, im);
+    for (let n = 0; n < NF; n++) y[t * H + n] += re[n] * w[n];
+  }
+  for (let t = -2; t < T + 2; t++) for (let n = 0; n < NF; n++) { const j = t * H + n; if (j >= 0 && j < o) den[j] += w[n] * w[n]; }
+  const out = new Float32Array(N), s0 = NF / 2 + pad - 2 * H;           // chunk sample 0 in frame-0-of-T time
+  for (let i = 0; i < N; i++) { const j = i + s0; out[i] = den[j] > 1e-8 ? y[j] / den[j] : 0; }
+  return out;
+}
 function median(a, n) {
   const b = a.subarray(0, n); for (let i = 1; i < n; i++) { const v = b[i]; let j = i - 1; while (j >= 0 && b[j] > v) { b[j + 1] = b[j]; j--; } b[j + 1] = v; }
   return b[n >> 1];
@@ -1670,6 +1723,6 @@ function encodeWav(st, sr = SR) {
   return b;
 }
 
-const API = { SR, NAMES, DEFAULTS, LOG, separate, analyze, autoArrange, parseArrangement, build, mixScore, renderKick, encodeMidi, decodeMidi, shuffleArrangement, master, previewTone, encodeWav, lufs, resample, repitch, stretch, fft, yinTrack, mono };
+const API = { SR, NAMES, DEFAULTS, LOG, separate, separateModel, analyze, autoArrange, parseArrangement, build, mixScore, renderKick, encodeMidi, decodeMidi, shuffleArrangement, master, previewTone, encodeWav, lufs, resample, repitch, stretch, fft, yinTrack, mono };
 if (typeof module !== "undefined" && module.exports) module.exports = API; else root.REMIX = API;
 })(typeof self !== "undefined" ? self : this);

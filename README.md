@@ -80,11 +80,19 @@ automatically. Ctrl-C to stop.
 ## Remix app (index.html)
 
 The home page is the remix app: drop a song (or its 4 stems: vocals / drums /
-bass / other, e.g. from Demucs; the vocal is far cleaner than the in-browser
-separation), and it builds a hardtekk remix in the browser.
+bass / other), and it builds a hardtekk remix in the browser.
+
+**Stems.** A song is split by htdemucs (Meta, MIT) in the browser: the ONNX
+export by Ghilda (MIT, 174 MB, fetched once from its Hugging Face repo and
+kept in the browser's cache) run by onnxruntime-web 1.29.0 (jsDelivr) on
+WebGPU; a 3.5 min song takes about 40 s on an Apple-silicon Mac. Without
+WebGPU, or when the download fails, the app falls back to its fast in-engine
+separation (much leakier vocal); the "neural stems" box turns the model off.
+Single-threaded WASM would take minutes per song (GitHub Pages cannot enable
+threads), so it is not used. Uploaded stems skip both.
 
 **Chop mode (default).** The groove exists before the song is looked at: a
-fixed tempo (175 BPM default) and hand-written section templates in a fixed
+fixed tempo and hand-written section templates in a fixed
 form (intro 8, build 8, drop 16, break 8, build 8, drop 16, outro 8; intro,
 build, drop, outro when the song has little vocal). Drops: distorted tonal
 kick on every beat, off-beat bass that stops before the next kick, clap on 2
@@ -99,8 +107,10 @@ phrases in the song's order. Each bar's kick and bass note is the root of
 the source passage its phrase plays there (the song's bass note, else its
 chord, else its key), so songs that change key or tempo are followed phrase
 by phrase. The song's own drums and bass are never used; its backing plays
-high-passed in breaks and builds only. Pitch (+4 st default) is a separate,
-deliberate shift.
+high-passed in breaks and builds only. Tempo (150-200 BPM) and pitch shift
+(the chosen one, +4 st default, moved by at most 2 st) are fitted together so
+the pitch shift's own speed-up brings the vocal to the grid and the
+remaining stretch stays near 1; the bpm control overrides the tempo.
 
 **Continuous mode** (the mode selector) is the previous engine: the whole
 song sped up on its detected beat grid with new drums on top.

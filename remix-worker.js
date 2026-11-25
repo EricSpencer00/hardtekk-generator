@@ -3,7 +3,7 @@
  * Holds the song, stems, analysis and mix buses between calls, so a kick
  * retune or a final render does not redo separation and analysis.
  *
- * in:  {type:"build", mix | stems, samples, opts}  {type:"rebuild", opts}
+ * in:  {type:"build", mix | stems, samples, opts}   (opts.separator "fast": skip the model)  {type:"rebuild", opts}
  *      {type:"kick", opts}  {type:"master", mix}
  * out: {type:"log"|"progress"|"built"|"kick"|"wav"|"error", ...}
  */
@@ -12,6 +12,35 @@ const R = self.REMIX;
 const S = {};
 R.LOG.fn = msg => postMessage({ type: "log", msg });
 const progress = stage => p => postMessage({ type: "progress", stage, p });
+
+/* The neural separator: htdemucs (Meta, MIT; ONNX export with the STFT left to the engine by Ghilda, MIT, 174 MB)
+ * from its Hugging Face repo, kept in the Cache API, run by onnxruntime-web on WebGPU. Without a WebGPU adapter it
+ * is skipped: single-threaded WASM (GitHub Pages cannot enable threads) takes ~12 s per 7.8 s chunk. */
+const ORT = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.29.0/dist/";
+const MODEL = "https://huggingface.co/Ghilda/htdemucs-onnx/resolve/850cd89461d0817276337061c29e6abceb86d75f/htdemucs.onnx";
+let session = null;
+async function modelBytes() {
+  const cache = await caches.open("hardtekk-models"), hit = await cache.match(MODEL);
+  if (hit) return new Uint8Array(await hit.arrayBuffer());
+  const r = await fetch(MODEL); if (!r.ok) throw new Error(`model download: HTTP ${r.status}`);
+  const n = +r.headers.get("content-length") || 174266088, parts = [], rd = r.body.getReader(); let got = 0;
+  for (;;) { const { done, value } = await rd.read(); if (done) break; parts.push(value); got += value.length; postMessage({ type: "progress", stage: "downloading", p: got / n }); }
+  const b = new Blob(parts); await cache.put(MODEL, new Response(b)); return new Uint8Array(await b.arrayBuffer());
+}
+async function modelStems(mix) {
+  if (!session) {
+    const gpu = self.navigator.gpu && await navigator.gpu.requestAdapter().catch(() => null);
+    if (!gpu) throw new Error("no WebGPU");
+    R.LOG.fn("loading the separation model"); const t0 = Date.now();
+    importScripts(ORT + "ort.webgpu.min.js"); ort.env.wasm.wasmPaths = ORT;
+    session = await ort.InferenceSession.create(await modelBytes(), { executionProviders: ["webgpu"], graphOptimizationLevel: "all" });
+    R.LOG.fn(`model ready in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+  }
+  return R.separateModel(mix, async (x, mag) => {
+    const r = await session.run({ mix: new ort.Tensor("float32", x, [1, 2, x.length / 2]), mag: new ort.Tensor("float32", mag, [1, 4, 2048, 336]) });
+    return { freq: r.freq.data, time: r.time.data };
+  }, progress("separating"));
+}
 
 function copyLayers(layers) {
   const out = {}, transfer = [];
@@ -41,8 +70,13 @@ onmessage = async e => {
   try {
     if (m.type === "build") {
       S.samples = m.samples; S.cache = {};      // new song: drop the speed/arrangement cache
-      if (m.stems) S.stems = m.stems;
-      else { R.LOG.fn("separating the song (no stems given)"); S.stems = await R.separate(m.mix, progress("separating")); }
+      S.stems = m.stems || null;
+      if (!S.stems && m.opts.separator !== "fast") {
+        const t0 = Date.now();
+        try { S.stems = await modelStems(m.mix); R.LOG.fn(`separated by the model in ${((Date.now() - t0) / 1000).toFixed(1)} s`); }
+        catch (err) { session = null; R.LOG.fn(`model separation unavailable (${err.message}): fast separation`); }
+      }
+      if (!S.stems) { R.LOG.fn("separating the song (fast)"); S.stems = await R.separate(m.mix, progress("separating")); }
       S.an = await R.analyze(S.stems, progress("analysing"));
       R.LOG.fn(`${S.an.bpm.toFixed(2)} BPM, ${R.NAMES[S.an.key.tonic]} ${S.an.key.mode}, ${S.an.nBars} bars`);
       await build(m.opts);

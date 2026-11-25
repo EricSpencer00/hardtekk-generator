@@ -46,7 +46,7 @@ function stemRole(name) { const n = name.toLowerCase(); return ["vocals", "drums
 
 /* ------------------------------------------------------------ build */
 function fxOpts() { return { risers: $("fx-risers").checked, impacts: $("fx-impacts").checked, echo: $("fx-echo").checked, tapeStop: $("fx-tape").checked, fadeInBars: +$("fx-fin").value, fadeOutBars: +$("fx-fout").value }; }
-function opts() { return { mode: $("mode").value, bpm: $("bpm").value === "auto" ? "auto" : +$("bpm").value, semis: +$("semis").value, pattern: $("pattern").value, h16: $("h16").checked, ...kickOpts(), ...fxOpts() }; }
+function opts() { return { separator: $("nn").checked ? "model" : "fast", mode: $("mode").value, bpm: $("bpm").value === "auto" ? "auto" : +$("bpm").value, semis: +$("semis").value, pattern: $("pattern").value, h16: $("h16").checked, ...kickOpts(), ...fxOpts() }; }
 $("go").addEventListener("click", async () => {
   stop(); busy(true); $("log").textContent = ""; prog(0); arrEdited = false; meta = null;
   try {
@@ -90,7 +90,7 @@ modeUi();
 $("arr").addEventListener("input", () => arrEdited = true);
 $("rebuild").addEventListener("click", () => { arrEdited = true; update(currentOpts()); });
 
-const STAGE = { separating: [0, 0.45], analysing: [0.45, 0.6], building: [0.6, 1], mastering: [0, 1] };
+const STAGE = { downloading: [0, 0.45], separating: [0, 0.45], analysing: [0.45, 0.6], building: [0.6, 1], mastering: [0, 1] };
 worker.onmessage = e => {
   const m = e.data;
   if (m.type === "log") log(m.msg);
