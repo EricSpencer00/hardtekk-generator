@@ -445,14 +445,12 @@ function circFit(times, weights, period) {
 }
 /** Tempo and beat phase from the drums: kick onsets for tempo, all drum onsets for phase. */
 function beatGrid(drums) {
-  const kick = filtfilt(drums, "low", 120);
-  const { o: ok, hop } = onsetFlux(kick, 256, 2048);
-  const kp = peaks(ok, Math.round(0.09 * SR / 256), 0.25).map(i => (i * 256 + 1024) / SR);
-  let best = { R: -1 };
-  for (let bpm = 70; bpm <= 200; bpm += 0.01) { const r = circFit(kp, null, 60 / bpm); if (r.R > best.R) best = { R: r.R, bpm }; }
-  let bpm = best.bpm; while (bpm < 100) bpm *= 2; while (bpm >= 200) bpm /= 2;
-  // drum onsets refined to the steepest rise of the broadband envelope
+  // tempo: where all the drum onsets cluster on the beat and the 8th, 100-200 BPM (the kick alone, often
+  // syncopated, locked to 4:3 and 5:4 of the tempo on 3 of 10 test songs)
   const { t: ft, s: fw, o } = onsetTimes(drums, 0.05, 0.2);
+  let best = { R: -1 };
+  for (let bpm = 100; bpm < 200; bpm += 0.02) { const P = 60 / bpm, r = (circFit(ft, fw, P).R + circFit(ft, fw, P / 2).R) / 2; if (r > best.R) best = { R: r, bpm }; }
+  const bpm = best.bpm;
   let per = 60 / bpm, ph = circFit(ft, fw, per).phase;
   // least-squares period and phase on the strong onsets near the grid
   const fwMed = Float32Array.from(fw).sort()[fw.length >> 1] || 0;
@@ -482,7 +480,7 @@ function beatGrid(drums) {
   const fit = phase => { let W = 0; const z = [0, 0, 0, 0]; ft.forEach((t, j) => { const p = phase(t); if (isNaN(p)) return; W += fw[j]; for (const m of [1, 2]) { z[2 * m - 2] += fw[j] * Math.cos(2 * Math.PI * m * p); z[2 * m - 1] += fw[j] * Math.sin(2 * Math.PI * m * p); } }); return (Math.hypot(z[0], z[1]) + Math.hypot(z[2], z[3])) / (2 * W || 1); };
   const Rrigid = fit(t => (t - ph) / per);
   let k = 0; const Rbeats = fit(t => { while (k > 0 && beats[k] > t) k--; while (k + 1 < beats.length && beats[k + 1] <= t) k++; return k + 1 < beats.length && t >= beats[0] ? (t - beats[k]) / (beats[k + 1] - beats[k]) : NaN; });
-  return { bpm: 60 / per, b0: ph, R: best.R, nKicks: kp.length, beats, Rrigid, Rbeats, nOnsets: ft.length, on: { t: ft, s: fw } };
+  return { bpm: 60 / per, b0: ph, R: best.R, beats, Rrigid, Rbeats, nOnsets: ft.length, on: { t: ft, s: fw } };
 }
 /** Per-beat RMS (dB) of a signal. */
 function perBeat(x, b0, beat, nb) {
