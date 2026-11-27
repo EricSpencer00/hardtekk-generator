@@ -1530,8 +1530,8 @@ function embellish(L, meta, o) {
     const prev = blocks[k - 1], next = blocks[k + 1], t0 = ot(b.out), i0 = S(t0);
     if (b.kind === "drop") {
       for (let q = prev?.kind === "drop" ? 8 : 0; q < b.n; q += 8) {
-        add(crashHit(2.6, 16 * k + q), ot(b.out + q), q ? 0.24 : 0.34);
-        if (q) add(rev(BEAT, 16 * k + q + 1), ot(b.out + q) - BEAT, 0.12);
+        add(crashHit(2.6, 16 * k + q), ot(b.out + q), q ? 0.4 : 0.5);
+        if (q) add(rev(BEAT, 16 * k + q + 1), ot(b.out + q) - BEAT, 0.16);
       }
       if (prev && prev.kind !== "drop") {
         const gs = S(t0 - BEAT / 2), a = S(ot(prev.kind === "build" ? prev.out : Math.max(0, b.out - 2))), n = gs - a;
@@ -1539,7 +1539,7 @@ function embellish(L, meta, o) {
           const y = noise(n, 1000 + 7 * k + c);
           svf(y, 0, n, i => 300 * Math.pow(14000 / 300, i / n), "lp", 1.4);
           svf(y, 0, n, i => 60 * Math.pow(2000 / 60, i / n), "hp");
-          for (let i = 0; i < n; i++) sfx[c][a + i] += y[i] * 0.2 * Math.pow(i / n, 1.6) * Math.min(1, (n - i) / 300);
+          for (let i = 0; i < n; i++) sfx[c][a + i] += y[i] * 0.25 * Math.pow(i / n, 1.6) * Math.min(1, (n - i) / 300);
         }
         const h = S(ot(Math.max(prev.out, b.out - 4)));                // high-pass the drums and bells into the drop
         sweep([L.perc, L.fx], h, i0, i => 20 * Math.pow(45, Math.min(1, (i - h) / (gs - h)) ** 2), "hp");
@@ -1554,19 +1554,19 @@ function embellish(L, meta, o) {
       }
     }
     if (b.kind === "break") {
-      add(crashHit(2.6, 900 + k), t0, 0.26);
+      add(crashHit(2.6, 900 + k), t0, 0.4);
       const n = S(2 * BAR);
       for (let c = 0; c < 2; c++) {                                     // downlifter: falling noise over 2 bars
         const y = noise(n, 1500 + 7 * k + c);
         svf(y, 0, n, i => 10000 * Math.pow(200 / 10000, Math.pow(i / n, 0.6)), "lp", 1.2);
-        for (let i = 0; i < n && i0 + i < N; i++) sfx[c][i0 + i] += y[i] * 0.16 * (1 - i / n) ** 2 * Math.min(1, i / 400);
+        for (let i = 0; i < n && i0 + i < N; i++) sfx[c][i0 + i] += y[i] * 0.22 * (1 - i / n) ** 2 * Math.min(1, i / 400);
       }
       if (next) {                                                       // drums back in over the next section's first 2 bars
         const a = S(ot(next.out)), e = S(ot(next.out + 2));
         gain(drums, a, e, i => 0.3 + 0.7 * Math.sin((i - a) / (e - a) * Math.PI / 2) ** 2);
       }
     }
-    if (b.kind === "build" || b.kind === "outro") add(crashHit(2.6, 700 + k), t0, 0.22);
+    if (b.kind === "build" || b.kind === "outro") add(crashHit(2.6, 700 + k), t0, 0.35);
     if (b.kind === "intro") { const e = S(ot(b.out + b.n)); sweep([...music, L.vocals, sfx], i0, e, i => 250 * Math.pow(72, (i - i0) / (e - i0)), "lp"); }
   });
   const ob = blocks.find(b => b.kind === "outro");
