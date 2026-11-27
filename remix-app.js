@@ -14,9 +14,9 @@ const worker = new Worker("remix-worker.js");
 let files = [], ctx = null, buffers = {}, chain = {}, master = null, sources = [], playing = false, startAt = 0, offset = 0, meta = null;
 
 /* ------------------------------------------------------------ log + progress */
-function log(msg, err = false) { const d = document.createElement("div"); d.textContent = msg; if (err) d.className = "err"; $("log").appendChild(d); $("log").scrollTop = 1e9; }
+function log(msg, err = false) { const d = document.createElement("div"); d.textContent = msg; if (err) { d.className = "err"; $("adv").open = true; } $("log").appendChild(d); $("log").scrollTop = 1e9; }
 function prog(p) { $("prog").style.width = `${Math.round(p * 100)}%`; }
-const busy = on => { for (const id of ["go", "k-apply", "render", "rebuild", "shuffle"]) $(id).disabled = on; };
+const busy = on => { for (const id of ["go", "k-apply", "render", "rebuild", "shuffle"]) $(id).disabled = on; if (on) stale(); };
 
 /* ------------------------------------------------------------ files in */
 function setFiles(list) {
@@ -103,7 +103,7 @@ worker.onmessage = e => {
     EDITOR.load(meta); $("editor").hidden = $("fxpanel").hidden = false;
     $("drop").classList.add("loaded"); $("droptitle").textContent = displayName(); $("files").textContent = ""; $("go").hidden = true;
     if (resume !== null) play(resume);
-    if (queued) { const q = queued; queued = null; update(q); }
+    if (queued) { const q = queued; queued = null; update(q); } else renderWav();
   }
   else if (m.type === "kick") { const was = playing, at = position(); stop(); buffers.kick = toBuffer(m.layer); if (was) play(at); busy(false); log("kick re-rendered"); }
   else if (m.type === "wav") {
@@ -111,6 +111,7 @@ worker.onmessage = e => {
     const base = (files[0]?.name || "remix").replace(/\.[^.]+$/, "").replace(/[-_ ]*(vocals|drums|bass|other)$/i, "");
     $("dl").href = url; $("dl").download = `${base} (hardtekk remix).wav`; $("dl").hidden = false;
     $("final").src = url; $("final").hidden = false; busy(false); prog(1); log(`rendered: ${m.lufs.toFixed(1)} LUFS`);
+    if (queued) { const q = queued; queued = null; update(q); }
   }
 };
 
@@ -211,11 +212,14 @@ async function kickSample() {
 }
 $("k-apply").addEventListener("click", async () => { busy(true); log("re-rendering the kick ..."); worker.postMessage({ type: "kick", opts: kickOpts(), sample: await kickSample() }); });
 $("k-sample").addEventListener("change", () => meta && $("k-apply").click());
-$("render").addEventListener("click", () => {
+/* Every build or drum change renders the master: the page's player and download are always the current remix. */
+function stale() { $("final").pause(); $("final").hidden = $("dl").hidden = true; }
+function renderWav() {
   busy(true); prog(0); log("rendering the master ...");
   const gains = {}; for (const [k] of LAYERS) gains[k] = mixState.mute[k] ? -120 : mixState.gains[k];
   worker.postMessage({ type: "master", mix: { gains, eq: mixState.eq, targetLufs: +$("lufs").value } });
-});
+}
+$("render").addEventListener("click", renderWav);
 
 EDITOR.init({
   onApply: score => { pendingResume = playing ? position() : null; stop(false); busy(true); prog(0); worker.postMessage({ type: "score", score }); },

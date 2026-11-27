@@ -932,6 +932,7 @@ const DEFAULTS = {
   arrangement: "",          // empty = automatic
   fadeInBars: 2, fadeOutBars: 8,
   risers: true, impacts: true, echo: true, tapeStop: true,
+  fx: true,                 // embellishments: build sweep + roll to 32nds + gap, crashes, downlifter, drum fades, filter in/out
   kickTone: "dark",         // "punch" | "dark": softer click, deeper pitch drop, sub-heavy tail
   bassVoice: "dark",        // "song" | "dark": outside the drops, the song's 808 or a dark sub resynthesised from it
   bassLo: 29, bassHi: 58,   // every bass note (kick tails, dark 808) is folded into this one-octave window, Hz
@@ -1085,6 +1086,8 @@ const TEMPLATES = {
   break: [[0, -1, {}], [-1, 0, { roll: "............xxxx", fill: 1 }]],
   outro: [[0, 8, { kick: K4, hat: OFF }]],
 };
+/** With fx: the build's roll starts as quarters (with the backbeat) two bars earlier: quarters, 8ths, 16ths, then 32nds (mixScore). */
+const FX_ROWS = [[-6, -4, { roll: "x.......x......." }]];
 const FORM = { full: "intro:8, build:8, drop:16, break:8, build:8, drop:16, outro:8", short: "intro:8, build:8, drop:16, outro:8" };
 
 /** Chop mode: a fixed-tempo groove from the templates, with the song's vocal phrases cut out, each
@@ -1165,15 +1168,16 @@ async function buildChop(stems, samples, an, o, progress, cache) {
   const score = { kick: [], bass: [], snare: [], hat: [], bell: [] }, plan = [];
   const TEKK = "x...x...x.x.x...", FILL = "x...x...x.x.x.x.";
   for (const b of blocks) {
-    const rows = (TEMPLATES[b.kind] || []).map(([a, e, pat]) => [a < 0 ? b.n + a : a, e <= 0 ? b.n + e : e, pat]);
+    const rows = [...(o.fx && b.kind === "build" && b.n >= 8 ? FX_ROWS : []), ...(TEMPLATES[b.kind] || [])].map(([a, e, pat]) => [a < 0 ? b.n + a : a, e <= 0 ? b.n + e : e, pat]);
     const r0 = Math.min(b.n, ...rows.filter(r => r[2].roll).map(r => r[0]));
     for (let i = 0; i < b.n; i++) {
       const bar = b.out + i, pc = roots[bar].pc, lane = {};
       for (const [a, e, pat] of rows) if (i >= a && i < e) Object.assign(lane, pat);
       if (b.kind === "drop" && lane.kick) {
         if (o.pattern === "tekk" || (o.pattern === "alt" && i % 2)) lane.kick = TEKK;
-        if (i % 8 === 7 && i + 1 < b.n) { lane.kick = FILL; lane.fill = 1; }
+        if (i % 8 === 7 && i + 1 < b.n) { lane.kick = FILL; lane.fill = 1; if (o.fx) lane.dfill = 1; }
       }
+      if (o.fx && b.kind === "build" && i === b.n - 1 && lane.roll) lane.roll = lane.roll.slice(0, 14) + "..";   // the gap before the drop
       const x = (k, s) => !!lane[k] && lane[k][s] === "x";
       for (let s = 0; s < 16; s++) {
         const st = bar * 16 + s;
@@ -1183,6 +1187,7 @@ async function buildChop(stems, samples, an, o, progress, cache) {
         if (x("roll", s)) score.snare.push({ s: st, g: 0.06 + 0.24 * Math.pow(((i - r0) * 16 + s) / ((b.n - r0) * 16), 1.5) });
         if (x("hat", s)) score.hat.push({ s: st, g: 0.34 });
         if (lane.h16 && o.h16 && !ph.triplet && s % 2) score.hat.push({ s: st, g: 0.13 });
+        if (lane.dfill && s >= 13) score.snare.push({ s: st, g: 0.12 + 0.05 * (s - 13) });   // drop fill: three 16ths into the next phrase
       }
       const lp = b.kind === "intro" ? 200 * Math.pow(2, 0.6 * i) : b.kind === "outro" && i >= b.n - 4 ? 3000 * Math.pow(2, -0.8 * (i - b.n + 5)) : null;
       plan.push({ lp, fill: !!lane.fill, kind: b.kind });
@@ -1360,6 +1365,14 @@ function mixScore(ctx, score, samples, opts) {
   const layers = { perc: st2(N), fx: st2(N) };
   const snare = samples._snareF || (samples._snareF = filt2(samples.snare, "high", 200)), hat = samples.hat;
   for (const e of score.snare) place(layers.perc, snare, t(e.s), e.g ?? 0.22);
+  if (o.fx) {                                                           // a build's roll goes to 32nds over its last bar's third beat
+    const sn = new Map(score.snare.map(e => [e.s, e.g ?? 0.22]));
+    blocks.forEach((b, i) => {
+      if (b.kind !== "build" || blocks[i + 1]?.kind !== "drop") return;
+      const s0 = (b.out + b.n - 1) * 16;
+      for (let s = s0 + 8; s < s0 + 14; s++) if (sn.has(s) && sn.has(s + 1)) place(layers.perc, snare, t(s + 0.5), 0.85 * sn.get(s));
+    });
+  }
   for (const e of score.hat) place(layers.perc, hat, t(e.s) + sw(e), e.g ?? 0.34);
   const bellSrc = samples._bellF || (samples._bellF = samples.bell.map(c => filt(c, "high", 150, 2)));
   samples._bells = samples._bells || new Map();
@@ -1434,7 +1447,7 @@ function applyEffects(L, meta, o) {
   const drops = blocks.filter((b, i) => b.kind === "drop" && (i === 0 || blocks[i - 1].kind !== "drop"));
   drops.forEach((b, k) => {
     const t = ot(b.out), i0 = Math.round(t * SR);
-    if (o.risers && b.out >= 2) {                                       // 2 bars of high-passed noise rising into the drop
+    if (o.risers && b.out >= 2 && !o.fx) {                              // 2 bars of high-passed noise rising into the drop
       const a = Math.round(ot(b.out - 2) * SR), n = i0 - a;
       for (let c = 0; c < 2; c++) {
         const y = noise(n, 1000 + 7 * k + c);
@@ -1464,7 +1477,8 @@ function applyEffects(L, meta, o) {
     }
   });
   const layers = Object.values(L);
-  if (o.tapeStop) {                                                     // brake the whole mix over the last beat before the outro
+  if (o.fx) embellish(L, meta, o);
+  if (o.tapeStop) {                                                    // brake the whole mix over the last beat before the outro
     const ob = blocks.findIndex(b => b.kind === "outro");
     if (ob > 0 && blocks[ob - 1].kind === "drop") {
       const e = Math.round(ot(blocks[ob].out) * SR), n = Math.round(BEAT * SR), a = e - n;
@@ -1482,6 +1496,81 @@ function applyEffects(L, meta, o) {
     for (let i = 0; i < fi && i < c.length; i++) c[i] *= Math.sin(i / fi * Math.PI / 2) ** 2;
     for (let i = Math.max(0, endS - fo); i < c.length; i++) c[i] *= i >= endS ? 0 : Math.cos((i - (endS - fo)) / fo * Math.PI / 2) ** 2;
   }
+}
+
+/** A crash: noise plus six square partials at the 808 cymbal's ratios (two octaves up), high-passed, len s long. */
+const _crashes = new Map();
+function crashHit(len, seed) {
+  const key = `${len}|${seed}`; if (_crashes.has(key)) return _crashes.get(key);
+  const n = Math.round(len * SR), F = [205.3, 304.4, 369.6, 522.7, 540, 800].map(f => 4 * f);
+  const y = [0, 1].map(c => {
+    const nz = noise(n, 3000 + 2 * seed + c), r = mulberry(77 + 2 * seed + c), ph = F.map(() => r()), x = zeros(n);
+    for (let i = 0; i < n; i++) {
+      const t = i / SR; let m = 0; for (let k = 0; k < 6; k++) m += (F[k] * t + ph[k]) % 1 < 0.5 ? 1 : -1;
+      x[i] = (nz[i] + 0.1 * m) * (0.75 * Math.exp(-t / (0.25 * len)) + 0.25 * Math.exp(-t / 0.05)) * Math.min(1, i / 40, (n - i) / (0.05 * n));
+    }
+    return filt(filt(x, "high", 2800, 4), "low", 15000, 2);
+  });
+  const out = normPeak(y); _crashes.set(key, out); return out;
+}
+/** The embellishments (o.fx), on the bar grid the kicks use. Into a drop: a noise sweep across the whole build
+ *  (low-pass opening, rising), the drums and bells high-passed over its last 4 bars, a gap on its last 8th (the
+ *  vocal and a reverse crash only). Drops: a crash on every 8-bar phrase (bar 1's with the impact), a reverse
+ *  crash on the beat before the later ones. Into a break: the drums fade out over the drop's last 2 bars and back
+ *  in over the next section's first 2; the break opens with a crash and a downlifter. A crash opens every build
+ *  and the outro. The intro filters in, the outro filters out. */
+function embellish(L, meta, o) {
+  const { blocks, BEAT, BAR, OB0, N } = meta, sfx = L.sfx, S = x => Math.max(0, Math.min(N, Math.round(x * SR)));
+  const ot = (bar, b = 0) => OB0 + bar * BAR + b * BEAT, add = (y, t, g) => place(sfx, y, t, g);
+  const sweep = (lays, a, e, fAt, kind) => { for (const lay of lays) if (lay) for (const c of lay) svf(c, a, e, fAt, kind); };
+  const gain = (lays, a, e, g) => { for (const lay of lays) if (lay) for (const c of lay) for (let i = a; i < e && i < c.length; i++) c[i] *= g(i); };
+  const rev = (len, seed) => crashHit(len, seed).map(c => Float32Array.from(c).reverse());
+  const drums = [L.kick, L.perc, L.bass808], music = [L.perc, L.fx, L.bed];
+  blocks.forEach((b, k) => {
+    const prev = blocks[k - 1], next = blocks[k + 1], t0 = ot(b.out), i0 = S(t0);
+    if (b.kind === "drop") {
+      for (let q = prev?.kind === "drop" ? 8 : 0; q < b.n; q += 8) {
+        add(crashHit(2.6, 16 * k + q), ot(b.out + q), q ? 0.4 : 0.5);
+        if (q) add(rev(BEAT, 16 * k + q + 1), ot(b.out + q) - BEAT, 0.16);
+      }
+      if (prev && prev.kind !== "drop") {
+        const gs = S(t0 - BEAT / 2), a = S(ot(prev.kind === "build" ? prev.out : Math.max(0, b.out - 2))), n = gs - a;
+        for (let c = 0; c < 2 && n > 0 && o.risers; c++) {             // the build's sweep, to the gap
+          const y = noise(n, 1000 + 7 * k + c);
+          svf(y, 0, n, i => 300 * Math.pow(14000 / 300, i / n), "lp", 1.4);
+          svf(y, 0, n, i => 60 * Math.pow(2000 / 60, i / n), "hp");
+          for (let i = 0; i < n; i++) sfx[c][a + i] += y[i] * 0.25 * Math.pow(i / n, 1.6) * Math.min(1, (n - i) / 300);
+        }
+        const h = S(ot(Math.max(prev.out, b.out - 4)));                // high-pass the drums and bells into the drop
+        sweep([L.perc, L.fx], h, i0, i => 20 * Math.pow(45, Math.min(1, (i - h) / (gs - h)) ** 2), "hp");
+        const f = Math.round(0.004 * SR);                               // the gap: the last 8th
+        gain([...music, L.kick, L.bass808], gs, i0, i => Math.max(0, 1 - (i - gs) / f));
+        add(rev(BEAT, 500 + k), t0 - BEAT, 0.2);
+      }
+      if (next?.kind === "break") {                                     // drums out over the last 2 bars, to -10 dB
+        const a = S(ot(b.out + b.n - 2)), e = S(ot(b.out + b.n)), z = S(ot(b.out + b.n) + 1.5);
+        gain(drums, a, z, i => i >= e ? 0.3 : 1 - 0.7 * Math.pow((i - a) / (e - a), 1.5));
+        sweep([L.perc], a, z, i => 16000 * Math.pow(1500 / 16000, Math.min(1, (i - a) / (e - a))), "lp");
+      }
+    }
+    if (b.kind === "break") {
+      add(crashHit(2.6, 900 + k), t0, 0.4);
+      const n = S(2 * BAR);
+      for (let c = 0; c < 2; c++) {                                     // downlifter: falling noise over 2 bars
+        const y = noise(n, 1500 + 7 * k + c);
+        svf(y, 0, n, i => 10000 * Math.pow(200 / 10000, Math.pow(i / n, 0.6)), "lp", 1.2);
+        for (let i = 0; i < n && i0 + i < N; i++) sfx[c][i0 + i] += y[i] * 0.22 * (1 - i / n) ** 2 * Math.min(1, i / 400);
+      }
+      if (next) {                                                       // drums back in over the next section's first 2 bars
+        const a = S(ot(next.out)), e = S(ot(next.out + 2));
+        gain(drums, a, e, i => 0.3 + 0.7 * Math.sin((i - a) / (e - a) * Math.PI / 2) ** 2);
+      }
+    }
+    if (b.kind === "build" || b.kind === "outro") add(crashHit(2.6, 700 + k), t0, 0.35);
+    if (b.kind === "intro") { const e = S(ot(b.out + b.n)); sweep([...music, L.vocals, sfx], i0, e, i => 250 * Math.pow(72, (i - i0) / (e - i0)), "lp"); }
+  });
+  const ob = blocks.find(b => b.kind === "outro");
+  if (ob) { const a = S(ot(ob.out)), e = S(ot(ob.out + ob.n)); sweep([...music, L.vocals, L.bass808, sfx], a, N, i => 18000 * Math.pow(400 / 18000, Math.min(1, (i - a) / (e - a))), "lp"); }
 }
 
 /** The kick layer alone, so the UI can retune it without rebuilding everything. */

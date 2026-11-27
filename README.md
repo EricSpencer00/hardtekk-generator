@@ -80,7 +80,8 @@ automatically. Ctrl-C to stop.
 ## Remix app (index.html)
 
 The home page is the remix app: drop a song (or its 4 stems: vocals / drums /
-bass / other), and it builds a hardtekk remix in the browser.
+bass / other), and it builds a hardtekk remix in the browser, ready to play or
+download. Every control is under "advanced".
 
 **Stems.** A song is split by htdemucs (Meta, MIT) in the browser: the ONNX
 export by Ghilda (MIT, 174 MB, fetched once from its Hugging Face repo and
@@ -122,11 +123,17 @@ remaining stretch stays near 1; the bpm control overrides the tempo.
 **Continuous mode** (the mode selector) is the previous engine: the whole
 song sped up on its detected beat grid with new drums on top.
 
-Both: double bells, risers, impacts, echo throws, tape stop, fades, a
-blown-out master, live mixer (level + 3-band EQ per bus, played through the
-render's master), kick picker (CC0 kicks in samples/cc0), drum editor grid
-(kick, bass, snare, hats, bell) with MIDI export/import, WAV render. The
-previous generator is at classic.html.
+Both: double bells, impacts, echo throws, tape stop, fades, a blown-out
+master, and the embellishments (`fx`, on by default), all synthesized and on
+the kicks' grid: a noise sweep across each build, its roll from quarters to
+32nds, drums and bells high-passed over its last 4 bars, a gap on its last 8th
+with a reverse crash; a crash opening every build, drop, break and outro and
+every 8 bars of a drop, with a drum fill and a reverse crash into the latter;
+drums fading out into a break and back in after it, a downlifter opening it;
+the intro filtering in, the outro filtering out. Also a live mixer (level +
+3-band EQ per bus, played through the render's master), kick picker (CC0 kicks
+in samples/cc0), drum editor grid (kick, bass, snare, hats, bell) with MIDI
+export/import, WAV render. The previous generator is at classic.html.
 
 Score a render against the original song and its true stems (pocket: how
 each vocal onset sits against our kick versus the song's kick; stretch,
