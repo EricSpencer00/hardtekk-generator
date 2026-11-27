@@ -4,6 +4,7 @@
  *   node tools/remix_node.js out.wav --mix song.wav    # in-engine separation
  *   node tools/remix_node.js out.wav --mix song.wav --truth DIR   # ... and measure what of DIR's drums+bass
  *                                                                  # and vocals reaches the chopped vocal
+ *   node tools/remix_node.js out.wav --scratch [seed]  # no song: an original track from the seed (random without one)
  *   --set=mode=continuous, --set=bpm=180, ... set any engine option
  *
  * Writes out.wav plus out.json (analysis, arrangement, score, chop placements, timings) and, with
@@ -49,6 +50,19 @@ function loadSamples(dir, kickFile) {
   const stage = (k, t) => { times[k] = (Date.now() - t) / 1000; };
   const stems4 = d => Object.fromEntries(["vocals", "drums", "bass", "other"].map(k => [k, readWav(path.join(d, k + ".wav"))]));
   let stems, ts = Date.now();
+  if (args.includes("--scratch")) {
+    const v = get("--scratch"), seed = v && /^\d+$/.test(v) ? +v : 1 + Math.floor(Math.random() * 999999), opts = { seed };
+    for (const a of args) { const m = /^--set=(\w+)=(.+)$/.exec(a); if (m) opts[m[1]] = isNaN(+m[2]) ? m[2] : +m[2]; }
+    const samples = loadSamples(path.join(__dirname, "..", "samples"), get("--kick"));
+    ts = Date.now(); const b = await R.scratch(samples, opts); stage("build", ts); lap(`built: ${b.meta.N_BARS} bars, ${b.meta.hits.length} kicks, ${b.meta.key}`);
+    ts = Date.now(); const m = await R.master(b.layers, b.meta, b.masks); stage("master", ts); lap(`mastered: ${m.lufs.toFixed(2)} LUFS`);
+    fs.writeFileSync(out, Buffer.from(R.encodeWav(m.out)));
+    fs.writeFileSync(out.replace(/\.wav$/, ".json"), JSON.stringify({ mode: "scratch", scratch: b.meta.chop.scratch, blocks: b.meta.blocks, OB0: b.meta.OB0, BEAT: b.meta.BEAT, key: b.meta.key,
+      hits: b.meta.hits.map(h => [h.t, R.NAMES[h.pc], h.long, h.kind]), score: b.meta.score, fills: b.meta.plan.map(p => !!p.fill), times, lufs: m.lufs }));
+    fs.writeFileSync(out.replace(/\.wav$/, ".mid"), Buffer.from(R.encodeMidi(b.meta)));
+    if (args.includes("--layers")) for (const [k, L] of Object.entries(b.layers)) fs.writeFileSync(out.replace(/\.wav$/, `_${k}.wav`), Buffer.from(R.encodeWav(L)));
+    return lap("written " + out);
+  }
   if (get("--stems")) { stems = stems4(get("--stems")); lap("stems loaded"); }
   else {
     const mix = readWav(get("--mix")), probes = {}; lap("mix loaded");
