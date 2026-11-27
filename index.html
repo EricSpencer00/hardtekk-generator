@@ -36,6 +36,8 @@ body::before { content: ""; position: fixed; inset: 0; z-index: -1; background: 
 .label { font-size: 11px; color: var(--fl-dim); }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .ctl { display: grid; gap: 4px; min-width: 0; }
+#source { display: flex; gap: 10px; align-items: stretch; }
+#source #drop { flex: 1; min-width: 0; }
 #drop { border: 1px dashed #5a4f49; border-radius: 3px; padding: 22px 12px; text-align: center; cursor: pointer; background: #141211; }
 #drop.over { border-color: var(--led); background: #221310; }
 #drop strong { display: block; font-size: 15px; color: #f1e9e4; }
@@ -49,7 +51,9 @@ button.go:disabled { filter: grayscale(0.75) brightness(0.55); cursor: not-allow
 .bar { height: 8px; background: #0e0c0b; border: 1px solid #000; border-radius: 2px; overflow: hidden; }
 .bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--red), var(--led)); transition: width .15s; }
 #log { font: 11px/1.45 var(--font-led); color: #b9b0ab; max-height: 140px; overflow: auto; white-space: pre-wrap; }
-#log .err { color: var(--red-hot); }
+#log .err, #err { color: var(--red-hot); font-size: 12px; }
+#transport { display: grid; gap: 8px; }
+#transport .row { gap: 14px; }
 .led { font: 13px var(--font-led); color: var(--led); text-shadow: 0 0 6px rgba(255,90,31,0.5); }
 .strips { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 @media (max-width: 760px) { .strips { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
@@ -69,6 +73,7 @@ textarea { width: 100%; min-height: 54px; font: 11px var(--font-led); background
 select, input[type=number] { font-family: var(--font-panel); }
 a.dl { color: var(--led); font-weight: 700; }
 [hidden] { display: none !important; }
+input[type=checkbox] { appearance: auto; -webkit-appearance: checkbox; opacity: 1; margin: 0; accent-color: var(--red); }
 #adv { grid-column: span 12; }
 #adv > summary { cursor: pointer; }
 #adv > .grid { margin-top: 10px; }
@@ -88,12 +93,20 @@ a.dl { color: var(--led); font-weight: 700; }
 
         <section class="rack">
           <div class="rack-body">
-            <div id="drop"><strong id="droptitle">drop a song</strong></div>
+            <div id="source"><div id="drop"><strong id="droptitle">drop a song</strong></div><button id="make">make one</button></div>
             <input type="file" id="file" accept="audio/*" multiple hidden>
             <div id="files"></div>
-            <div class="bar"><i id="prog"></i></div>
-            <audio id="final" controls hidden></audio>
-            <a class="dl" id="dl" hidden>download</a>
+            <div class="bar" id="bar" hidden><i id="prog"></i></div>
+            <div id="err" hidden></div>
+            <div id="transport" hidden>
+              <div class="row">
+                <button class="go" id="play">play</button>
+                <span class="led" id="time">0:00</span>
+                <a class="dl" id="dl" hidden>download</a>
+              </div>
+              <div id="sections"></div>
+              <input type="range" id="seek" min="0" max="1000" value="0">
+            </div>
           </div>
         </section>
 
@@ -133,12 +146,9 @@ a.dl { color: var(--led); font-weight: 700; }
           <h2>Mix</h2>
           <div class="rack-body">
             <div class="row">
-              <button id="play">play</button><button id="stop">stop</button>
-              <span class="led" id="time">0:00</span><span class="led" id="info"></span>
+              <span class="led" id="info"></span>
               <label class="row label"><input type="checkbox" id="pmaster" checked> master</label>
             </div>
-            <div id="sections"></div>
-            <input type="range" id="seek" min="0" max="1000" value="0">
             <div class="strips" id="strips"></div>
           </div>
         </section>

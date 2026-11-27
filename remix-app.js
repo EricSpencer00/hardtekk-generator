@@ -11,12 +11,12 @@ const SAMPLES = { kick: "kick-hardtekk_C.wav", snare: "snare-hardtekk-distorted-
                   hat: "phonk-closed-hi-hats-thin_C_minor.wav", bell: "hardtekk-bell-shot.wav" };
 const LAYERS = [["kick", "kick"], ["bass808", "808"], ["bed", "synths"], ["vocals", "vocals"], ["perc", "drums"], ["fx", "bells"], ["sfx", "effects"]];
 const worker = new Worker("remix-worker.js");
-let files = [], ctx = null, buffers = {}, chain = {}, master = null, sources = [], playing = false, startAt = 0, offset = 0, meta = null;
+let files = [], made = null, ctx = null, buffers = {}, chain = {}, master = null, sources = [], playing = false, startAt = 0, offset = 0, meta = null;
 
 /* ------------------------------------------------------------ log + progress */
-function log(msg, err = false) { const d = document.createElement("div"); d.textContent = msg; if (err) { d.className = "err"; $("adv").open = true; } $("log").appendChild(d); $("log").scrollTop = 1e9; }
+function log(msg, err = false) { const d = document.createElement("div"); d.textContent = msg; if (err) { d.className = "err"; $("err").textContent = msg; $("err").hidden = false; } $("log").appendChild(d); $("log").scrollTop = 1e9; }
 function prog(p) { $("prog").style.width = `${Math.round(p * 100)}%`; }
-const busy = on => { for (const id of ["go", "k-apply", "render", "rebuild", "shuffle"]) $(id).disabled = on; if (on) stale(); };
+const busy = on => { for (const id of ["go", "make", "k-apply", "render", "rebuild", "shuffle"]) $(id).disabled = on; $("bar").hidden = !on; if (on) { stale(); $("err").hidden = true; } };
 
 /* ------------------------------------------------------------ files in */
 function setFiles(list) {
@@ -47,16 +47,20 @@ function stemRole(name) { const n = name.toLowerCase(); return ["vocals", "drums
 /* ------------------------------------------------------------ build */
 function fxOpts() { return { risers: $("fx-risers").checked, impacts: $("fx-impacts").checked, echo: $("fx-echo").checked, tapeStop: $("fx-tape").checked, fadeInBars: +$("fx-fin").value, fadeOutBars: +$("fx-fout").value }; }
 function opts() { return { separator: $("nn").checked ? "model" : "fast", mode: $("mode").value, bpm: $("bpm").value === "auto" ? "auto" : +$("bpm").value, semis: +$("semis").value, pattern: $("pattern").value, h16: $("h16").checked, ...kickOpts(), ...fxOpts() }; }
+async function loadSamples(ac) {
+  const samples = {};
+  for (const [k, f] of Object.entries(SAMPLES)) {
+    const r = await fetch("samples/" + encodeURIComponent(f)); if (!r.ok) throw new Error(`sample ${f}: HTTP ${r.status}`);
+    samples[k] = normPeak(await decode(ac, await r.arrayBuffer()));
+  }
+  const ks = await kickSample(); samples.kick = ks.data; samples._kickId = ks.id;
+  return samples;
+}
 $("go").addEventListener("click", async () => {
-  stop(); busy(true); $("log").textContent = ""; prog(0); arrEdited = false; meta = null;
+  stop(); busy(true); $("log").textContent = ""; prog(0); arrEdited = false; meta = null; made = null;
   try {
     const ac = new OfflineAudioContext(2, 1, SR);   // decode at 44.1 kHz whatever the device runs at
-    const samples = {};
-    for (const [k, f] of Object.entries(SAMPLES)) {
-      const r = await fetch("samples/" + encodeURIComponent(f)); if (!r.ok) throw new Error(`sample ${f}: HTTP ${r.status}`);
-      samples[k] = normPeak(await decode(ac, await r.arrayBuffer()));
-    }
-    const ks = await kickSample(); samples.kick = ks.data; samples._kickId = ks.id;
+    const samples = await loadSamples(ac);
     const roles = files.map(f => stemRole(f.name));
     const msg = { type: "build", samples, opts: opts() }, transfer = [];
     if (files.length >= 4 && ["vocals", "drums", "bass", "other"].every(r => roles.includes(r))) {
@@ -68,12 +72,19 @@ $("go").addEventListener("click", async () => {
       log(`${files[0].name}: ${(msg.mix[0].length / SR).toFixed(1)} s`);
     }
     worker.postMessage(msg, transfer);
-  } catch (e) { log(e.message, true); busy(false); }
+  } catch (e) { log(e.name === "EncodingError" ? `can't read ${files[0].name} as audio` : e.message, true); busy(false); }
+});
+// no song: every press composes a new track from a fresh seed
+$("make").addEventListener("click", async () => {
+  stop(); busy(true); $("log").textContent = ""; prog(0); arrEdited = false; meta = null; files = [];
+  made = 1 + Math.floor(Math.random() * 999999);
+  try { worker.postMessage({ type: "scratch", seed: made, samples: await loadSamples(new OfflineAudioContext(2, 1, SR)), opts: opts() }); }
+  catch (e) { log(e.message, true); busy(false); }
 });
 /* Small changes reuse the worker's cache: no decode, separation or analysis.
  * A groove or hats change only redoes the drums; a speed seen before is cached. */
 let pendingResume = null, queued = null, arrEdited = false, timer = 0;
-const displayName = () => files.length >= 4 ? files[0].name.replace(/[-_ ]*(vocals|drums|bass|other)(\.[^.]+)$/i, "$2") + " (stems)" : files[0]?.name || "";
+const displayName = () => made ? `original #${made}` : files.length >= 4 ? files[0].name.replace(/[-_ ]*(vocals|drums|bass|other)(\.[^.]+)$/i, "$2") + " (stems)" : files[0]?.name || "";
 function update(o) {
   if (!meta) return;
   if (busyNow()) { queued = o; return; }
@@ -109,8 +120,8 @@ worker.onmessage = e => {
   else if (m.type === "wav") {
     const url = URL.createObjectURL(new Blob([m.wav], { type: "audio/wav" }));
     const base = (files[0]?.name || "remix").replace(/\.[^.]+$/, "").replace(/[-_ ]*(vocals|drums|bass|other)$/i, "");
-    $("dl").href = url; $("dl").download = `${base} (hardtekk remix).wav`; $("dl").hidden = false;
-    $("final").src = url; $("final").hidden = false; busy(false); prog(1); log(`rendered: ${m.lufs.toFixed(1)} LUFS`);
+    $("dl").href = url; $("dl").download = made ? `hardtekk original ${made}.wav` : `${base} (hardtekk remix).wav`; $("dl").hidden = false;
+    busy(false); prog(1); log(`rendered: ${m.lufs.toFixed(1)} LUFS`);
     if (queued) { const q = queued; queued = null; update(q); }
   }
 };
@@ -152,7 +163,7 @@ const setDrive = () => { if (tone) master.drive.gain.value = Math.pow(10, (+$("l
 $("pmaster").addEventListener("change", () => master && routeMaster());
 $("lufs").addEventListener("input", () => master && setDrive());
 function toBuffer(L) { const b = ctx.createBuffer(2, L[0].length, SR); b.copyToChannel(L[0], 0); b.copyToChannel(L[1], 1); return b; }
-function loadLayers(layers) { ensureCtx(); buffers = {}; for (const [k] of LAYERS) if (layers[k]) buffers[k] = toBuffer(layers[k]); buildStrips(); applyStrips(); offset = 0; $("player").hidden = $("kickpanel").hidden = $("outpanel").hidden = false; }
+function loadLayers(layers) { ensureCtx(); buffers = {}; for (const [k] of LAYERS) if (layers[k]) buffers[k] = toBuffer(layers[k]); buildStrips(); applyStrips(); offset = 0; $("transport").hidden = $("player").hidden = $("kickpanel").hidden = $("outpanel").hidden = false; }
 const duration = () => buffers.kick ? buffers.kick.duration : 0;
 const position = () => playing ? Math.min(duration(), offset + ctx.currentTime - startAt) : offset;
 function play(at = position()) {
@@ -162,7 +173,6 @@ function play(at = position()) {
 }
 function stop(reset = true) { for (const s of sources) try { s.stop(); } catch {} sources = []; if (playing && !reset) offset = position(); playing = false; $("play").textContent = "play"; if (reset) offset = 0; }
 $("play").addEventListener("click", () => { if (playing) { const at = position(); stop(false); offset = at; } else play(); });
-$("stop").addEventListener("click", () => stop(true));
 $("seek").addEventListener("input", () => { const at = $("seek").value / 1000 * duration(); if (playing) play(at); else offset = at; });
 setInterval(() => {
   if (!ctx || !duration()) return;
@@ -199,7 +209,7 @@ function applyStrips() {
 function showMeta() {
   $("info").textContent = `${meta.bpm.toFixed(1)} BPM · ${meta.key} · ${meta.bars} bars · ${meta.kicks} kicks`;
   $("arr").value = meta.arrangement;
-  $("sections").innerHTML = meta.blocks.map(b => `<span class="k-${b.kind}" style="flex:${b.n}" title="${meta.mode === "chop" ? b.name : `${b.name} ← bars ${b.src}-${b.src + b.n - 1}`}">${b.name}</span>`).join("");
+  $("sections").innerHTML = meta.blocks.map(b => `<span class="k-${b.kind}" style="flex:${b.n}" title="${meta.mode ? b.name : `${b.name} ← bars ${b.src}-${b.src + b.n - 1}`}">${b.name}</span>`).join("");
 }
 
 /* ------------------------------------------------------------ kick + render */
@@ -213,7 +223,7 @@ async function kickSample() {
 $("k-apply").addEventListener("click", async () => { busy(true); log("re-rendering the kick ..."); worker.postMessage({ type: "kick", opts: kickOpts(), sample: await kickSample() }); });
 $("k-sample").addEventListener("change", () => meta && $("k-apply").click());
 /* Every build or drum change renders the master: the page's player and download are always the current remix. */
-function stale() { $("final").pause(); $("final").hidden = $("dl").hidden = true; }
+function stale() { $("dl").hidden = true; }
 function renderWav() {
   busy(true); prog(0); log("rendering the master ...");
   const gains = {}; for (const [k] of LAYERS) gains[k] = mixState.mute[k] ? -120 : mixState.gains[k];

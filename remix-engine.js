@@ -44,7 +44,8 @@ function rbj(type, f, q, sr = SR, gainDb = 0) {
     const s = 2 * Math.sqrt(A) * al;
     b0 = A * ((A + 1) - (A - 1) * cw + s); b1 = 2 * A * ((A - 1) - (A + 1) * cw); b2 = A * ((A + 1) - (A - 1) * cw - s);
     a0 = (A + 1) + (A - 1) * cw + s; a1 = -2 * ((A - 1) + (A + 1) * cw); a2 = (A + 1) + (A - 1) * cw - s;
-  } else throw new Error("filter type " + type);
+  } else if (type === "band") { b0 = al; b1 = 0; b2 = -al; a0 = 1 + al; a1 = -2 * cw; a2 = 1 - al; }
+  else throw new Error("filter type " + type);
   return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
 }
 function biquad(x, c) {               // in place, direct form I in float64
@@ -674,13 +675,18 @@ async function analyzePhrases(stems, an, progress = () => {}) {
   });
   for (let i = W_.length - 1, j = W_.length ? vit[i].v.indexOf(Math.max(...vit[i].v)) : 0; i >= 0; j = vit[i].from[j], i--) W_[i].beat = cand(W_[i], j);
   // the grid around a phrase: its own fit for period and 16th phase, the beat at the 16th nearest the song's beat there
+  // no clear grid around the phrase (its drums drop out or are too sparse): the nearest window's beat, carried at
+  // the song's tempo (its tracked beats where the tempo moves)
   const fitGrid = (a, b) => {
-    const g = fit16(a, b); if (!g.ok || !W_.length) return { ok: false, P: g.P };
-    const mid = (a + b) / 2, w = W_.reduce((x, y) => Math.abs(y.c - mid) < Math.abs(x.c - mid) ? y : x);
-    return { ok: true, P: g.P, ph: at(g.ph16, g.P / 4, at(w.beat, w.P, mid)), R: g.R };
+    if (!W_.length) return { ok: false, P: localP(a, b) };
+    const g = fit16(a, b), mid = (a + b) / 2, w = W_.reduce((x, y) => Math.abs(y.c - mid) < Math.abs(x.c - mid) ? y : x);
+    if (g.ok) return { ok: true, P: g.P, ph: at(g.ph16, g.P / 4, at(w.beat, w.P, mid)), R: g.R };
+    if (!src.moving) return { ok: true, carried: true, P: P0, ph: w.beat, R: 0 };
+    const kw = Math.round(beatPos(w.beat)), km = Math.round(beatPos(mid));
+    return { ok: true, carried: true, P: localP(a, b), ph: beatAt(km) + (w.beat - beatAt(kw)), R: 0 };
   };
   const beatAt = k => { const B = src.beats; return !src.moving ? src.ph + k * P0 : k <= 0 ? B[0] + k * P0 : k >= B.length - 1 ? B[B.length - 1] + (k - B.length + 1) * P0 : B[k]; };
-  let snapped = 0;
+  let snapped = 0, carried = 0;
   const all = ph.map((p, i) => {
     let smax = 0; von.t.forEach((t, k) => { if (t >= p.t0 - 0.06 && t < p.t1) smax = Math.max(smax, von.s[k]); });
     const k0 = von.t.findIndex((t, k) => t >= p.t0 - 0.06 && t < p.t0 + Math.min(0.3, 0.6 * P0) && von.s[k] >= 0.3 * smax);
@@ -692,7 +698,8 @@ async function analyzePhrases(stems, an, progress = () => {}) {
       const k = beatPos(on); let kb = src.down + 4 * Math.floor((k - src.down) / 4); if (k - kb >= 3) kb += 4;
       bar0 = g.ph + Math.round((beatAt(kb) - g.ph) / P) * P; q = (on - bar0) / P;
     } else snapped++;
-    const gridR = g.R ?? 0, gridOk = g.ok;
+    if (g.carried) carried++;
+    const gridR = g.R ?? 0, gridOk = g.ok && !g.carried;
     let nv = 0, na = 0; for (let k = 0; k < vt.t.length; k++) if (vt.t[k] >= p.t0 && vt.t[k] < p.t1) { na++; nv += vt.voiced[k]; }
     const kb = Math.max(1, Math.ceil((p.t1 - bar0) / P - 0.1));
     return { i, t0: p.t0, t1: p.t1, s0: Math.min(p.t0, on) - 0.03, on, q, P, bar0, kb, gridR, gridOk, vf: na ? nv / na : 0, loud: rmsDb(full, Math.round(on * SR), Math.round(p.t1 * SR)) };
@@ -751,7 +758,7 @@ async function analyzePhrases(stems, an, progress = () => {}) {
     const rep = hookRuns.filter(r => r !== top && dur(r) >= 0.5 * dur(top) && r.some(p => ti.some(i => S[i][list.indexOf(p)] >= thr))).sort((a, b) => rs_(b) - rs_(a));
     hookRuns = [top, ...rep, ...hookRuns.filter(r => r !== top && !rep.includes(r)).sort((a, b) => rs_(b) - rs_(a))];
   }
-  log(`  phrases: ${all.length} found, ${list.length} usable (voiced share >= ${(0.5 * vfMed).toFixed(2)});${snapped ? ` ${snapped} with no clear beat around them start on their bar line;` : ""} hook by ${how} (evidence ${conf.toFixed(1)} SD): ${hookRuns.map(r => r.map(p => p.on.toFixed(1)).join("+")).join(", ")} s`);
+  log(`  phrases: ${all.length} found, ${list.length} usable (voiced share >= ${(0.5 * vfMed).toFixed(2)});${carried ? ` ${carried} with no clear beat around them take the nearest one;` : ""}${snapped ? ` ${snapped} with no beat at all start on their bar line;` : ""} hook by ${how} (evidence ${conf.toFixed(1)} SD): ${hookRuns.map(r => r.map(p => p.on.toFixed(1)).join("+")).join(", ")} s`);
   progress(1);
   // feel: the drums' onsets against the beat, straight 16ths or 8th-note triplets (harmonic 4 vs 3 of their phase)
   const dph = src.on.t.map(beatPos), Rh = h => Math.hypot(avg(dph.map(x => Math.cos(2 * Math.PI * h * x))), avg(dph.map(x => Math.sin(2 * Math.PI * h * x))));
@@ -1109,6 +1116,40 @@ function tempoFit(Ps, P0, bpm, semis) {
   return best;
 }
 
+/** The groove: the section templates as a score; kick and bass play each bar's root (roots[bar].pc). */
+function grooveScore(blocks, roots, o, triplet) {
+  const score = { kick: [], bass: [], snare: [], hat: [], bell: [] }, plan = [];
+  const TEKK = "x...x...x.x.x...", FILL = "x...x...x.x.x.x.";
+  for (const b of blocks) {
+    const rows = [...(o.fx && b.kind === "build" && b.n >= 8 ? FX_ROWS : []), ...(TEMPLATES[b.kind] || [])].map(([a, e, pat]) => [a < 0 ? b.n + a : a, e <= 0 ? b.n + e : e, pat]);
+    const r0 = Math.min(b.n, ...rows.filter(r => r[2].roll).map(r => r[0]));
+    for (let i = 0; i < b.n; i++) {
+      const bar = b.out + i, pc = roots[bar].pc, lane = {};
+      for (const [a, e, pat] of rows) if (i >= a && i < e) Object.assign(lane, pat);
+      if (b.kind === "drop" && lane.kick) {
+        if (o.pattern === "tekk" || (o.pattern === "alt" && i % 2)) lane.kick = TEKK;
+        if (i % 8 === 7 && i + 1 < b.n) { lane.kick = FILL; lane.fill = 1; if (o.fx) lane.dfill = 1; }
+      }
+      if (o.fx && b.kind === "build" && i === b.n - 1 && lane.roll) lane.roll = lane.roll.slice(0, 14) + "..";   // the gap before the drop
+      const x = (k, s) => !!lane[k] && lane[k][s] === "x";
+      for (let s = 0; s < 16; s++) {
+        const st = bar * 16 + s;
+        if (x("kick", s)) score.kick.push({ s: st, pc });
+        if (x("bass", s) && !x("kick", s)) score.bass.push({ s: st, pc });
+        if (x("snare", s)) score.snare.push({ s: st, g: 0.22 });
+        if (x("roll", s)) score.snare.push({ s: st, g: 0.06 + 0.24 * Math.pow(((i - r0) * 16 + s) / ((b.n - r0) * 16), 1.5) });
+        if (x("hat", s)) score.hat.push({ s: st, g: 0.34 });
+        if (lane.h16 && o.h16 && !triplet && s % 2) score.hat.push({ s: st, g: 0.13 });
+        if (lane.dfill && s >= 13) score.snare.push({ s: st, g: 0.12 + 0.05 * (s - 13) });   // drop fill: three 16ths into the next phrase
+      }
+      const lp = b.kind === "intro" ? 200 * Math.pow(2, 0.6 * i) : b.kind === "outro" && i >= b.n - 4 ? 3000 * Math.pow(2, -0.8 * (i - b.n + 5)) : null;
+      plan.push({ lp, fill: !!lane.fill, kind: b.kind });
+    }
+  }
+  for (const b of blocks.filter((b, i) => b.kind === "drop" && i > 0 && blocks[i - 1].kind !== "drop")) for (const s of [4, 12]) score.bell.push({ s: (b.out - 2) * 16 + s, g: 0.5, semis: 0 });
+  return { score, plan };
+}
+
 async function buildChop(stems, samples, an, o, progress, cache) {
   const ph = cache.phrases || (cache.phrases = await analyzePhrases(stems, an, p => progress(0.4 * p)));
   const fit = tempoFit(ph.list.map(p => p.P), ph.P0, o.bpm, o.semis), m = fit.m, asked = { bpm: o.bpm, semis: o.semis };
@@ -1164,36 +1205,7 @@ async function buildChop(stems, samples, an, o, progress, cache) {
   if (!cache.chop || cache.chop.key !== ck) cache.chop = { key: ck, ...(await renderChops(stems, ph, placed, blocks, { T, BAR, R, m, N, ot, out }, o, progress)) };
   const { vox, bed, leak, stutter } = cache.chop;
 
-  // the groove: the templates as a score; kick and bass play each bar's root
-  const score = { kick: [], bass: [], snare: [], hat: [], bell: [] }, plan = [];
-  const TEKK = "x...x...x.x.x...", FILL = "x...x...x.x.x.x.";
-  for (const b of blocks) {
-    const rows = [...(o.fx && b.kind === "build" && b.n >= 8 ? FX_ROWS : []), ...(TEMPLATES[b.kind] || [])].map(([a, e, pat]) => [a < 0 ? b.n + a : a, e <= 0 ? b.n + e : e, pat]);
-    const r0 = Math.min(b.n, ...rows.filter(r => r[2].roll).map(r => r[0]));
-    for (let i = 0; i < b.n; i++) {
-      const bar = b.out + i, pc = roots[bar].pc, lane = {};
-      for (const [a, e, pat] of rows) if (i >= a && i < e) Object.assign(lane, pat);
-      if (b.kind === "drop" && lane.kick) {
-        if (o.pattern === "tekk" || (o.pattern === "alt" && i % 2)) lane.kick = TEKK;
-        if (i % 8 === 7 && i + 1 < b.n) { lane.kick = FILL; lane.fill = 1; if (o.fx) lane.dfill = 1; }
-      }
-      if (o.fx && b.kind === "build" && i === b.n - 1 && lane.roll) lane.roll = lane.roll.slice(0, 14) + "..";   // the gap before the drop
-      const x = (k, s) => !!lane[k] && lane[k][s] === "x";
-      for (let s = 0; s < 16; s++) {
-        const st = bar * 16 + s;
-        if (x("kick", s)) score.kick.push({ s: st, pc });
-        if (x("bass", s) && !x("kick", s)) score.bass.push({ s: st, pc });
-        if (x("snare", s)) score.snare.push({ s: st, g: 0.22 });
-        if (x("roll", s)) score.snare.push({ s: st, g: 0.06 + 0.24 * Math.pow(((i - r0) * 16 + s) / ((b.n - r0) * 16), 1.5) });
-        if (x("hat", s)) score.hat.push({ s: st, g: 0.34 });
-        if (lane.h16 && o.h16 && !ph.triplet && s % 2) score.hat.push({ s: st, g: 0.13 });
-        if (lane.dfill && s >= 13) score.snare.push({ s: st, g: 0.12 + 0.05 * (s - 13) });   // drop fill: three 16ths into the next phrase
-      }
-      const lp = b.kind === "intro" ? 200 * Math.pow(2, 0.6 * i) : b.kind === "outro" && i >= b.n - 4 ? 3000 * Math.pow(2, -0.8 * (i - b.n + 5)) : null;
-      plan.push({ lp, fill: !!lane.fill, kind: b.kind });
-    }
-  }
-  for (const b of blocks.filter((b, i) => b.kind === "drop" && i > 0 && blocks[i - 1].kind !== "drop")) for (const s of [4, 12]) score.bell.push({ s: (b.out - 2) * 16 + s, g: 0.5, semis: 0 });
+  const { score, plan } = grooveScore(blocks, roots, o, ph.triplet);
   const mask = pred => { const mk = zeros(N); barInfo.forEach((bi, k) => { if (pred(bi, k)) mk.fill(1, Math.round((ot(k) - 0.005) * SR), Math.min(N, Math.round((ot(k + 1) - 0.005) * SR))); }); return smooth(mk, Math.round(0.012 * SR)); };
   const kickBars = new Set(score.kick.map(e => Math.floor(e.s / 16)));
   const drumM = mask((_, k) => kickBars.has(k)), dropM = mask(bi => bi.kind === "drop");
@@ -1257,6 +1269,157 @@ async function renderChops(stems, ph, placed, blocks, g, o, progress) {
     stutter.push({ bar: b.out + b.n - 1, hits });
   });
   return { vox, bed, leak, stutter };
+}
+
+/* ------------------------------------------------------------ scratch mode: an original track, no song */
+const SCALE_OF = { minor: [0, 2, 3, 5, 7, 8, 10], major: [0, 2, 4, 5, 7, 9, 11] };
+/** Chord loops in scale degrees (0 = the tonic), one chord per bar. */
+const PROGS = { minor: [[0, 5, 2, 6], [0, 6, 5, 6], [0, 3, 5, 4], [5, 6, 0, 0], [0, 5, 3, 6], [5, 3, 0, 6]],
+                major: [[0, 4, 5, 3], [5, 3, 0, 4], [0, 5, 3, 4], [3, 4, 5, 5]] };
+/** Vowel formants (Hz, bandwidth Hz), a little above an adult voice's. */
+const VOWELS = { a: [[800, 90], [1200, 110], [2700, 160]], e: [[560, 70], [1950, 100], [2700, 160]], i: [[300, 60], [2500, 100], [3300, 170]],
+                 o: [[600, 80], [900, 90], [2600, 160]], u: [[330, 60], [920, 90], [2500, 160]] };
+/** The track's material, from the seed: key, tempo, a 4-bar chord loop, a 4-bar hook (call and answer) and four 2-bar
+ *  vocal-chop figures. Notes are {s: 16th step in the 4-bar loop, len: steps, deg: scale degree from the tonic}. */
+function compose(seed, bpmOpt) {
+  const r = mulberry((seed * 2654435761) ^ 0x9E3779B1), pick = a => a[Math.floor(r() * a.length)];
+  const mode = r() < 0.75 ? "minor" : "major", tonic = Math.floor(r() * 12), prog = pick(PROGS[mode]);
+  const bpm = +bpmOpt > 0 ? +bpmOpt : 168 + Math.floor(r() * 15), lead = r() < 0.6 ? "supersaw" : "pluck";
+  const near = (d, set) => { const c = []; for (const x of set) for (let o = -14; o <= 14; o += 7) c.push(x + o); c.sort((a, b) => Math.abs(a - d) - Math.abs(b - d)); return c; };
+  const tones = bar => [0, 2, 4].map(k => prog[bar % 4] + k);
+  const clamp = d => Math.max(-2, Math.min(9, d));
+  const line = (steps, from, bars0, end) => {                          // pitches for onset steps: chord tones on beats, steps between
+    let d = from; return steps.map((s, k) => {
+      const bar = bars0 + (s >> 4), last = k === steps.length - 1 && end;
+      if (last) d = near(d, [prog[bar % 4]])[0];
+      else if (s % 4 === 0 || k === 0) d = near(d, tones(bar))[r() < 0.7 ? 0 : 1];
+      else d = d + pick([-1, 1, 1, -2, 2, 0]);
+      return (d = clamp(d));
+    });
+  };
+  const on = []; for (let s = 0; s < 32; s++) if (s === 0 || r() < (s % 4 === 0 ? 0.8 : s % 2 === 0 ? 0.55 : 0.25)) on.push(s);
+  const call = line(on, prog[0] + 4, 0, false), cut = on.filter(s => s < 24);
+  const ans = [...cut.map((s, k) => call[k]), ...line(on.filter(s => s >= 24), call[cut.length - 1] ?? prog[0], 2, true)];
+  const hook = [...on.map((s, k) => ({ s, deg: call[k] })), ...on.map((s, k) => ({ s: s + 32, deg: ans[k] }))];
+  hook.forEach((n, k) => n.len = Math.min(4, (hook[k + 1]?.s ?? 64) - n.s));
+  const vowels = Object.keys(VOWELS), chops = [];
+  for (let v = 0; v < 4; v++) {
+    const st = []; for (let s = 0; s < 32; s++) if ((s % 16 === 0) || r() < [0.5, 0.15, 0.45, 0.25][s % 4]) st.push(s);
+    const deg = line(st, prog[0] + 2, 0, false).map(d => d - 7), vw = st.map(() => pick(vowels));
+    chops.push(st.map((s, k) => ({ s, len: Math.min(2, (st[k + 1] ?? 32) - s), deg: deg[k], vowel: vw[k], hard: r() < 0.4 })));
+  }
+  return { seed, mode, tonic, bpm, prog, lead, hook, chops, midi: d => 60 + tonic + SCALE_OF[mode][((d % 7) + 7) % 7] + 12 * Math.floor(d / 7) };
+}
+const polySaw = (ph, dt) => { let v = 2 * ph - 1; if (ph < dt) { const t = ph / dt; v -= t + t - t * t - 1; } else if (ph > 1 - dt) { const t = (ph - 1) / dt; v -= t * t + t + t + 1; } return v; };
+/** Detuned saws into a stereo bus: {t, dur, midi, g} notes. "supersaw": 7 voices, held; "pluck": 3 voices, decaying
+ *  with its brightness; "pad": 5 voices, slow attack and release. */
+function synthNotes(bus, notes, kind, seed) {
+  const r = mulberry(seed), V = { supersaw: [-21, -13, -6, 0, 6, 13, 21], pluck: [-8, 0, 8], pad: [-16, -7, 0, 7, 16] }[kind];
+  const att = kind === "pad" ? 0.08 : 0.003, rel = kind === "pad" ? 0.35 : 0.04;
+  for (const n of notes) {
+    const i0 = Math.round(n.t * SR), len = Math.round((n.dur + rel) * SR), f0 = midiToHz(n.midi), ph = V.map(() => r()), lp = [0, 0];
+    for (let i = 0; i < len && i0 + i < bus[0].length; i++) {
+      const t = i / SR, env = Math.min(1, t / att) * (kind === "pluck" ? Math.exp(-t / 0.22) : t < 0.15 ? 1 - 0.25 * t / 0.15 : 0.75) * (t > n.dur ? Math.max(0, 1 - (t - n.dur) / rel) : 1);
+      let L = 0, R = 0;
+      V.forEach((c, k) => { const dt = f0 * Math.pow(2, c / 1200) / SR; ph[k] = (ph[k] + dt) % 1; const v = polySaw(ph[k], dt); if (k % 2) R += v; else L += v; if (c === 0) { L += 0.5 * v; R += 0.5 * v; } });
+      if (kind === "pluck") { const a = 1 - Math.exp(-2 * Math.PI * (700 + 7000 * Math.exp(-t / 0.07)) / SR); lp[0] += a * (L - lp[0]); lp[1] += a * (R - lp[1]); L = lp[0]; R = lp[1]; }
+      const g = env * n.g / V.length; bus[0][i0 + i] += L * g; bus[1][i0 + i] += R * g;
+    }
+  }
+}
+/** Formant-synth vocal chops: a glottal saw (+ breath) through three vowel formants, a noise consonant ahead of the
+ *  hard ones so the vowel itself starts on the step. {t, dur, midi, vowel, hard, g} syllables. */
+function synthVox(bus, syl, seed) {
+  const r = mulberry(seed);
+  for (const y of syl) {
+    const n = Math.round((y.dur + 0.03) * SR), f0 = midiToHz(y.midi), src = zeros(n); let ph = r();
+    for (let i = 0; i < n; i++) {
+      const t = i / SR, vib = t > 0.12 ? 0.15 * Math.sin(2 * Math.PI * 5.5 * t) : 0, dt = f0 * Math.pow(2, vib / 12) / SR;
+      ph = (ph + dt) % 1; src[i] = polySaw(ph, dt) + 0.04 * (r() * 2 - 1);
+    }
+    const v = zeros(n);
+    VOWELS[y.vowel].forEach(([f, bw], k) => { const b = biquad(Float32Array.from(src), rbj("band", f, f / bw)); for (let i = 0; i < n; i++) v[i] += b[i] * [1, 0.55, 0.3][k]; });
+    for (let i = 0; i < n; i++) { const t = i / SR; v[i] *= Math.min(1, t / 0.006) * (t > y.dur ? Math.max(0, 1 - (t - y.dur) / 0.03) : 1); }
+    const i0 = Math.round(y.t * SR);
+    for (let i = 0; i < n && i0 + i < bus[0].length; i++) { bus[0][i0 + i] += v[i] * y.g; bus[1][i0 + i] += v[i] * y.g; }
+    if (y.hard) {                                                        // "t"/"k": 12 ms of bright noise just before
+      const m = Math.round(0.012 * SR), c = filt(noise(m, seed + i0), "high", 4000, 2), j0 = i0 - m;
+      for (let i = 0; i < m; i++) if (j0 + i >= 0) { const g = 0.35 * y.g * Math.sin(Math.PI * i / m); bus[0][j0 + i] += c[i] * g; bus[1][j0 + i] += c[i] * g; }
+    }
+  }
+}
+const scaleTo = (y, a, e, db) => { const m = mono(y), cur = rmsDb(m, Math.max(0, a), Math.min(m.length, e)), g = Math.pow(10, (db - cur) / 20); if (isFinite(g)) for (const c of y) for (let i = 0; i < c.length; i++) c[i] *= g; return y; };
+
+/** Scratch mode: a hardtekk track composed from a seed, no song. The same form, groove, kick, fx and master as chop
+ *  mode; the hook is a supersaw (or pluck) lead, the backing a pad on the chord loop, the "vocal" formant-synth chops.
+ *  Every note starts on a 16th step of the grid. */
+async function scratch(samples, opts = {}, progress = () => {}) {
+  const o = { ...DEFAULTS, ...opts }, seed = Math.max(1, Math.floor(+o.seed || 1)), C = compose(seed, o.bpm);
+  const T = 60 / C.bpm, BEAT = T, BAR = 4 * T, STEP = T / 4, OB0 = 0.05;
+  const sections = parseArrangement(o.arrangement || FORM.full);
+  let ob = 0; const blocks = sections.map(s => { const b = { ...s, src: 0, out: ob }; ob += s.n; return b; });
+  const N_BARS = ob, N = Math.round((OB0 + N_BARS * BAR + 3) * SR), ot = (bar, b = 0) => OB0 + bar * BAR + b * BEAT, st = (bar, s) => ot(bar) + s * STEP;
+  const barInfo = []; for (const b of blocks) for (let i = 0; i < b.n; i++) barInfo.push({ block: b.name, kind: b.kind, idx: i, n: b.n });
+  const drops = blocks.filter(b => b.kind === "drop");
+  // the parts, bar by bar
+  const lead = [], pad = [], vox = [];
+  const hookAt = (bar, g, oct = 0) => { const k = bar % 4; for (const n of C.hook) if (n.s >> 4 === k) lead.push({ t: st(bar, n.s % 16), dur: n.len * STEP * (C.lead === "pluck" ? 0.6 : 0.92), midi: C.midi(n.deg) + 12 * oct, g }); };
+  const chopAt = (bar, v, g) => { const k = bar % 2; for (const y of C.chops[v]) if (y.s >> 4 === k) vox.push({ t: st(bar, y.s % 16), dur: y.len * STEP * 0.8, midi: C.midi(y.deg) + 12, vowel: y.vowel, hard: y.hard, g }); };
+  barInfo.forEach((bi, bar) => {
+    const deg = C.prog[bar % 4], i = bi.idx, di = drops.findIndex(b => b.out <= bar && bar < b.out + b.n);
+    const chord = [0, 2, 4].map(k => C.midi(deg + k) - 12);                 // octave 4
+    pad.push(...chord.map(m => ({ t: ot(bar), dur: BAR, midi: m, g: bi.kind === "drop" ? 0.35 : 1 })));
+    if (bi.kind === "drop") {
+      hookAt(bar, 1); if (di > 0) hookAt(bar, 0.45, 1);                     // the second drop doubles the hook an octave up
+      const resp = di === 0 ? (i % 8 >= 4) : true;                          // drop 1: the chops answer in bars 5-8; drop 2: throughout
+      if (resp) chopAt(bar, [0, 1, 0, 2, 0, 1, 3, 2][(Math.floor(i / 2) + 2 * di) % 8], 1);
+    } else if (bi.kind === "build") hookAt(bar, 0.5 + 0.5 * i / bi.n);
+    else if (bi.kind === "intro" && i >= 4) hookAt(bar, 0.4);
+    else if (bi.kind === "outro" && i < 4) hookAt(bar, 0.7);
+    else if (bi.kind === "break") {                                         // long vowels on the chord's tones, half notes
+      for (const b2 of [0, 2]) vox.push({ t: ot(bar, b2), dur: 2 * BEAT * 0.9, midi: C.midi(deg + (b2 ? 2 : 4)) + 12, vowel: ["a", "o", "u", "a"][i % 4], hard: false, g: 0.8 });
+    }
+  });
+  // the build's stutter: the next drop's first chop syllable, four times in 8ths over the last two beats
+  const stutter = [];
+  blocks.forEach((b, k) => {
+    if (b.kind !== "build" || blocks[k + 1]?.kind !== "drop") return;
+    const y = C.chops[0][0], bar = b.out + b.n - 1;
+    for (let q = 0; q < 4; q++) vox.push({ t: ot(bar, 2 + q / 2), dur: T / 2 * 0.7, midi: C.midi(y.deg) + 12, vowel: y.vowel, hard: y.hard, g: 0.55 + 0.1 * q });
+    stutter.push({ bar, hits: 4 });
+  });
+  progress(0.2); await tick();
+  const leadB = st2(N), padB = st2(N), voxB = st2(N);
+  // the heard onset on the step: each part starts early by where its attack's steepest rise lands (measured)
+  for (const n of lead) n.t -= 0.003; for (const y of vox) y.t -= 0.005;
+  synthNotes(leadB, lead, C.lead, seed + 1); progress(0.45); await tick();
+  synthNotes(padB, pad, "pad", seed + 2); progress(0.65); await tick();
+  synthVox(voxB, vox, seed + 3); progress(0.8); await tick();
+  // tone and level: lead and pad above the kick's range, the pad dark; levels set in the first drop
+  const d1 = drops[0] || blocks[0], a = Math.round(ot(d1.out) * SR), e = Math.round(ot(d1.out + d1.n) * SR);
+  const leadF = leadB.map(c => filt(filt(c, "high", 180, 2), "low", C.lead === "pluck" ? 9000 : 6500, 2)), padF = padB.map(c => filt(filt(c, "high", 140, 4), "low", 2200, 2));
+  scaleTo(leadF, a, e, -15); scaleTo(padF, Math.round(ot(blocks[0].out) * SR), Math.round(ot(blocks[0].out + blocks[0].n) * SR), -22);
+  const voxF = scaleTo(voxB.map(c => filt(c, "high", 150, 2)), a, e, -14);
+  const intro = blocks.find(b => b.kind === "intro");                       // the intro filters in
+  if (intro) for (const c of [...leadF, ...padF]) svf(c, Math.round(ot(intro.out) * SR), Math.round(ot(intro.out + intro.n) * SR), i => 250 * Math.pow(60, (i / SR - ot(intro.out)) / (intro.n * BAR)), "lp");
+  const bed = leadF.map((c, k) => Float32Array.from(c, (v, i) => v + padF[k][i]));
+  // roots, groove, masks: as chop mode
+  const roots = barInfo.map((_, bar) => ({ pc: (C.tonic + SCALE_OF[C.mode][C.prog[bar % 4]]) % 12, how: "chord" }));
+  const { score, plan } = grooveScore(blocks, roots, o, false);
+  const mask = pred => { const mk = zeros(N); barInfo.forEach((bi, k) => { if (pred(bi, k)) mk.fill(1, Math.round((ot(k) - 0.005) * SR), Math.min(N, Math.round((ot(k + 1) - 0.005) * SR))); }); return smooth(mk, Math.round(0.012 * SR)); };
+  const kickBars = new Set(score.kick.map(x => Math.floor(x.s / 16)));
+  const drumM = mask((_, k) => kickBars.has(k)), dropM = mask(bi => bi.kind === "drop");
+  const sweeps = blocks.filter(b => b.kind === "build").map(b => [Math.round(ot(b.out + b.n - 2) * SR), Math.round(ot(b.out + b.n) * SR), 30, 800, 1.5, "hp"]);
+  const { voxComp, act } = vocalBus(voxF, dropM);
+  const A = { blocks, barInfo, N, N_BARS, BEAT, BAR, OB0, ot, drumM, dropM, bedPre: bed, bedPres: bed.map(c => band(c, 900, 4200)), voxComp, act, sweeps };
+  const key = `${NAMES[C.tonic]} ${C.mode}`, chords = C.prog.map(d => { const r_ = (C.tonic + SCALE_OF[C.mode][d]) % 12, third = (SCALE_OF[C.mode][(d + 2) % 7] - SCALE_OF[C.mode][d] + 12) % 12; return NAMES[r_] + (third === 3 ? "m" : ""); });
+  log(`  scratch #${seed}: ${C.bpm} BPM, ${key}, ${chords.join(" ")}, ${C.lead} lead, ${lead.length} lead notes, ${vox.length} vocal chops`);
+  const chop = { scratch: { seed, bpm: C.bpm, key, chords, lead: C.lead }, bpm: C.bpm, semis: 0, m: 1, stutter, placed: [], phrases: [] };
+  const ctx = { mode: "scratch", tuneCents: 0, A, plan, scales: [], key, scale: [], arrangement: blocks.map(b => `${b.kind}:${b.n}`).join(", "), o: { ...o, bpm: C.bpm }, chop, swing: false };
+  progress(0.9); await tick();
+  const res = mixScore(ctx, score, samples, o);
+  progress(1);
+  return res;
 }
 
 /** Continuous mode: the whole song sped up on its own (detected) beat grid, the new drums on top. */
@@ -1389,7 +1552,7 @@ function mixScore(ctx, score, samples, opts) {
   const meta = { tuneCents: ctx.tuneCents, blocks, barInfo, plan: ctx.plan, hits, OB0, BEAT, BAR, N, N_BARS, bpm: 60 / BEAT, key: ctx.key, scale: ctx.scale, arrangement: ctx.arrangement, score, mode: ctx.mode, chop: ctx.chop, swing: !!ctx.swing };
   const kickBus = renderKick(samples, meta, o, act);                   // first: the bass ends where each kick starts
   let bass808 = st2(N);
-  if (ctx.mode !== "chop") {                                            // the song's 808, or a dark sub playing its line
+  if (!ctx.mode) {                                                      // continuous: the song's 808, or a dark sub playing its line
     const dk = `${o.bassLo}|${o.bassHi}`;
     if (o.bassVoice === "dark" && A.bassDarkKey !== dk) { A.bassDark = darkSub(A, o.bassLo, o.bassHi, ctx.tuneCents || 0); A.bassDarkKey = dk; }
     const bassSrc = o.bassVoice === "dark" ? A.bassDark : A.bass808;
@@ -1874,6 +2037,6 @@ function encodeWav(st, sr = SR) {
   return b;
 }
 
-const API = { SR, NAMES, DEFAULTS, LOG, separate, separateModel, analyze, autoArrange, parseArrangement, build, mixScore, renderKick, encodeMidi, decodeMidi, shuffleArrangement, master, previewTone, encodeWav, lufs, resample, repitch, stretch, fft, yinTrack, mono };
+const API = { SR, NAMES, DEFAULTS, LOG, separate, separateModel, analyze, scratch, autoArrange, parseArrangement, build, mixScore, renderKick, encodeMidi, decodeMidi, shuffleArrangement, master, previewTone, encodeWav, lufs, resample, repitch, stretch, fft, yinTrack, mono };
 if (typeof module !== "undefined" && module.exports) module.exports = API; else root.REMIX = API;
 })(typeof self !== "undefined" ? self : this);
