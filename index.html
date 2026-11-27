@@ -41,8 +41,6 @@ body::before { content: ""; position: fixed; inset: 0; z-index: -1; background: 
 #drop strong { display: block; font-size: 15px; color: #f1e9e4; }
 #drop.loaded { padding: 6px 10px; text-align: left; display: flex; gap: 10px; align-items: baseline; border-style: solid; border-color: #2e2926; }
 #drop.loaded strong { font-size: 12px; display: inline; }
-#drop.loaded .label::before { content: "drop or click to replace"; }
-#drop.loaded .label { font-size: 0; } #drop.loaded .label::before { font-size: 10px; }
 body.dragging #drop { border-color: var(--led); background: #221310; }
 #files { font-size: 11px; color: var(--fl-dim); }
 button.go { padding: 8px 18px; font-weight: 700; color: #fff; border: 1px solid #2c0602; border-radius: 3px; cursor: pointer;
@@ -71,6 +69,9 @@ textarea { width: 100%; min-height: 54px; font: 11px var(--font-led); background
 select, input[type=number] { font-family: var(--font-panel); }
 a.dl { color: var(--led); font-weight: 700; }
 [hidden] { display: none !important; }
+#adv { grid-column: span 12; }
+#adv > summary { cursor: pointer; }
+#adv > .grid { margin-top: 10px; }
 .credit { width: min(100%, 1092px); margin: 10px auto 0; font-size: 10px; color: #8e837c; }
 .credit a { color: #b9b0ab; }
 </style>
@@ -85,14 +86,20 @@ a.dl { color: var(--led); font-weight: 700; }
     <div class="window-body">
       <div class="grid">
 
-        <section class="rack s6">
-          <h2>Source</h2>
+        <section class="rack">
           <div class="rack-body">
-            <div id="drop"><strong id="droptitle">drop a song, or its 4 stems</strong><span class="label">vocals / drums / bass / other</span></div>
+            <div id="drop"><strong id="droptitle">drop a song</strong></div>
             <input type="file" id="file" accept="audio/*" multiple hidden>
             <div id="files"></div>
+            <div class="bar"><i id="prog"></i></div>
+            <audio id="final" controls hidden></audio>
+            <a class="dl" id="dl" hidden>download</a>
           </div>
         </section>
+
+        <details id="adv">
+        <summary class="label">advanced</summary>
+        <div class="grid">
 
         <section class="rack s6">
           <h2>Build</h2>
@@ -118,7 +125,6 @@ a.dl { color: var(--led); font-weight: 700; }
               <button id="shuffle" disabled>shuffle</button>
               <button class="go" id="go" disabled>build</button>
             </div>
-            <div class="bar"><i id="prog"></i></div>
             <div id="log"></div>
           </div>
         </section>
@@ -144,7 +150,6 @@ a.dl { color: var(--led); font-weight: 700; }
               <button id="e-apply" disabled>apply</button>
               <button id="e-midi">export MIDI</button>
               <label class="row label">import MIDI <input type="file" id="e-midi-in" accept=".mid,.midi,audio/midi"></label>
-              <span class="label">click: add / remove &middot; scroll a note: pitch &middot; shift + scroll: whole bar</span>
             </div>
             <div id="e-wrap"><canvas id="e-grid" height="138"></canvas></div>
           </div>
@@ -200,8 +205,7 @@ a.dl { color: var(--led); font-weight: 700; }
             <div class="strip">
               <label>LUFS <input type="range" id="lufs" min="-12" max="-4" step="0.5" value="-5.5"><output id="lufs-v">-5.5</output></label>
             </div>
-            <div class="row"><button class="go" id="render">render wav</button><a class="dl" id="dl" hidden>download</a></div>
-            <audio id="final" controls hidden></audio>
+            <div class="row"><button class="go" id="render">render wav</button></div>
             <details>
               <summary class="label">arrangement</summary>
               <textarea id="arr" spellcheck="false"></textarea>
@@ -209,6 +213,9 @@ a.dl { color: var(--led); font-weight: 700; }
             </details>
           </div>
         </section>
+
+        </div>
+        </details>
 
       </div>
     </div>
