@@ -1,9 +1,9 @@
 /* remix-app.js — UI for remix.html. DSP runs in remix-worker.js.
  *
  * The mixer plays the six buses live through WebAudio (level + 3-band EQ per
- * bus, a light preview master). "render wav" sends the same levels and EQ to
- * the worker, which runs the real master chain. The kick panel re-renders only
- * the kick bus.
+ * bus, then the render's master: its match EQ and drive into a tanh clipper).
+ * "render wav" sends the same levels and EQ to the worker, which runs the real
+ * master chain. The kick panel re-renders only the kick bus.
  */
 const $ = id => document.getElementById(id);
 const SR = 44100;
@@ -46,7 +46,7 @@ function stemRole(name) { const n = name.toLowerCase(); return ["vocals", "drums
 
 /* ------------------------------------------------------------ build */
 function fxOpts() { return { risers: $("fx-risers").checked, impacts: $("fx-impacts").checked, echo: $("fx-echo").checked, tapeStop: $("fx-tape").checked, fadeInBars: +$("fx-fin").value, fadeOutBars: +$("fx-fout").value }; }
-function opts() { return { semis: +$("semis").value, pattern: $("pattern").value, h16: $("h16").checked, ...kickOpts(), ...fxOpts() }; }
+function opts() { return { separator: $("nn").checked ? "model" : "fast", mode: $("mode").value, bpm: $("bpm").value === "auto" ? "auto" : +$("bpm").value, semis: +$("semis").value, pattern: $("pattern").value, h16: $("h16").checked, ...kickOpts(), ...fxOpts() }; }
 $("go").addEventListener("click", async () => {
   stop(); busy(true); $("log").textContent = ""; prog(0); arrEdited = false; meta = null;
   try {
@@ -82,11 +82,15 @@ function update(o) {
 }
 const busyNow = () => $("render").disabled;
 const currentOpts = () => ({ ...opts(), ...(arrEdited ? { arrangement: $("arr").value.trim() } : {}) });
-for (const id of ["semis", "pattern", "h16"]) $(id).addEventListener("change", () => { clearTimeout(timer); timer = setTimeout(() => update(currentOpts()), 120); });
+for (const id of ["mode", "bpm", "semis", "pattern", "h16"]) $(id).addEventListener("change", () => { clearTimeout(timer); timer = setTimeout(() => update(currentOpts()), 120); });
+// the arrangement text differs per mode (chop: kind:bars, continuous: kind:src:bars); shuffle deals the song's own blocks
+const modeUi = () => { const chop = $("mode").value === "chop"; $("bpm").disabled = !chop; $("shuffle").hidden = chop; };
+$("mode").addEventListener("change", () => { arrEdited = false; modeUi(); });
+modeUi();
 $("arr").addEventListener("input", () => arrEdited = true);
 $("rebuild").addEventListener("click", () => { arrEdited = true; update(currentOpts()); });
 
-const STAGE = { separating: [0, 0.45], analysing: [0.45, 0.6], building: [0.6, 1], mastering: [0, 1] };
+const STAGE = { downloading: [0, 0.45], separating: [0, 0.45], analysing: [0.45, 0.6], building: [0.6, 1], mastering: [0, 1] };
 worker.onmessage = e => {
   const m = e.data;
   if (m.type === "log") log(m.msg);
@@ -95,7 +99,7 @@ worker.onmessage = e => {
   else if (m.type === "error") { log(m.msg, true); busy(false); }
   else if (m.type === "built") {
     const resume = pendingResume; pendingResume = null;
-    meta = m.meta; loadLayers(m.layers); showMeta(); busy(false); prog(1);
+    meta = m.meta; loadLayers(m.layers); setTone(m.tone); showMeta(); busy(false); prog(1);
     EDITOR.load(meta); $("editor").hidden = $("fxpanel").hidden = false;
     $("drop").classList.add("loaded"); $("droptitle").textContent = displayName(); $("files").textContent = ""; $("go").hidden = true;
     if (resume !== null) play(resume);
@@ -114,12 +118,13 @@ worker.onmessage = e => {
 function ensureCtx() {
   if (ctx) return;
   ctx = new AudioContext({ sampleRate: SR });
-  const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -18; comp.ratio.value = 4; comp.attack.value = 0.003; comp.release.value = 0.1; comp.knee.value = 6;
-  const shaper = ctx.createWaveShaper(), curve = new Float32Array(2048);
-  for (let i = 0; i < curve.length; i++) { const x = i / 1023.5 - 1; curve[i] = Math.tanh(1.6 * x) / Math.tanh(1.6); }
+  // the render's master: 25 Hz high-pass, match EQ (from the worker), drive into an oversampled tanh clipper
+  const hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 25;
+  const drive = ctx.createGain(), shaper = ctx.createWaveShaper(), curve = new Float32Array(4096);
+  for (let i = 0; i < curve.length; i++) curve[i] = Math.tanh(CLIP_IN * (i / 2047.5 - 1));
   shaper.curve = curve; shaper.oversample = "4x";
   const bus = ctx.createGain(), out = ctx.createGain(); out.gain.value = 0.9;
-  master = { bus, comp, shaper, out };
+  master = { bus, hp, eq: [], drive, shaper, out };
   routeMaster();
   out.connect(ctx.destination);
   for (const [k] of LAYERS) {
@@ -130,11 +135,21 @@ function ensureCtx() {
     chain[k] = { lo, mid, hi, g, input: lo };
   }
 }
+const CLIP_IN = 4;                                   // the shaper's curve spans +-4 (12 dB over full scale)
+let tone = null;
 function routeMaster() {
-  const { bus, comp, shaper, out } = master; bus.disconnect(); comp.disconnect(); shaper.disconnect();
-  if ($("pmaster").checked) { bus.connect(comp).connect(shaper).connect(out); bus.gain.value = 1.6; } else { bus.connect(out); bus.gain.value = 0.7; }
+  const { bus, hp, eq, drive, shaper, out } = master; for (const n of [bus, hp, ...eq, drive, shaper]) n.disconnect();
+  if ($("pmaster").checked) { [bus, hp, ...eq, drive, shaper, out].reduce((a, b) => a.connect(b)); bus.gain.value = 1; } else { bus.connect(out); bus.gain.value = 0.7; }
 }
+/** The worker's match EQ and the mix's loudness before the clipper: drive it like the render does. */
+function setTone(t) {
+  tone = t; for (const n of master.eq) n.disconnect();
+  master.eq = t.eq.map(e => { const f = ctx.createBiquadFilter(); f.type = e.type === "peak" ? "peaking" : e.type; f.frequency.value = e.f; f.Q.value = e.q; f.gain.value = e.g; return f; });
+  setDrive(); routeMaster();
+}
+const setDrive = () => { if (tone) master.drive.gain.value = Math.pow(10, (+$("lufs").value - tone.lufs) / 20) / CLIP_IN; };
 $("pmaster").addEventListener("change", () => master && routeMaster());
+$("lufs").addEventListener("input", () => master && setDrive());
 function toBuffer(L) { const b = ctx.createBuffer(2, L[0].length, SR); b.copyToChannel(L[0], 0); b.copyToChannel(L[1], 1); return b; }
 function loadLayers(layers) { ensureCtx(); buffers = {}; for (const [k] of LAYERS) if (layers[k]) buffers[k] = toBuffer(layers[k]); buildStrips(); applyStrips(); offset = 0; $("player").hidden = $("kickpanel").hidden = $("outpanel").hidden = false; }
 const duration = () => buffers.kick ? buffers.kick.duration : 0;
@@ -183,7 +198,7 @@ function applyStrips() {
 function showMeta() {
   $("info").textContent = `${meta.bpm.toFixed(1)} BPM · ${meta.key} · ${meta.bars} bars · ${meta.kicks} kicks`;
   $("arr").value = meta.arrangement;
-  $("sections").innerHTML = meta.blocks.map(b => `<span class="k-${b.kind}" style="flex:${b.n}" title="${b.name} ← bars ${b.src}-${b.src + b.n - 1}">${b.name}</span>`).join("");
+  $("sections").innerHTML = meta.blocks.map(b => `<span class="k-${b.kind}" style="flex:${b.n}" title="${meta.mode === "chop" ? b.name : `${b.name} ← bars ${b.src}-${b.src + b.n - 1}`}">${b.name}</span>`).join("");
 }
 
 /* ------------------------------------------------------------ kick + render */

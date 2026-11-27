@@ -79,14 +79,61 @@ automatically. Ctrl-C to stop.
 
 ## Remix app (index.html)
 
-The home page is now the remix app: drop a song (or its 4 stems), and it
-builds a hardtekk remix in the browser: the song sped up (+4 st default),
-re-arranged from its own 4-bar blocks, sustained in-key kicks that play the
-song's own 808 notes in the drops, double bells, risers, impacts, echo
-throws, tape stop, fades, and a blown-out master. Live mixer (level + 3-band
-EQ per bus), kick picker (CC0 kicks in samples/cc0), drum editor grid with
-MIDI export/import, arrangement shuffle, WAV render. The previous generator
-is at classic.html.
+The home page is the remix app: drop a song (or its 4 stems: vocals / drums /
+bass / other), and it builds a hardtekk remix in the browser.
+
+**Stems.** A song is split by htdemucs (Meta, MIT) in the browser: the ONNX
+export by Ghilda (MIT, 174 MB, fetched once from its Hugging Face repo and
+kept in the browser's cache) run by onnxruntime-web 1.29.0 (jsDelivr) on
+WebGPU; a 3.5 min song takes about 40 s on an Apple-silicon Mac. Without
+WebGPU, or when the download fails, the app falls back to its fast in-engine
+separation (much leakier vocal); the "neural stems" box turns the model off.
+Single-threaded WASM would take minutes per song (GitHub Pages cannot enable
+threads), so it is not used. Uploaded stems skip both.
+
+**Chop mode (default).** The groove exists before the song is looked at: a
+fixed tempo and hand-written section templates in a fixed
+form (intro 8, build 8, drop 16, break 8, build 8, drop 16, outro 8; intro,
+build, drop, outro when the song has little vocal). Drops: distorted tonal
+kick on every beat, off-beat bass that stops before the next kick, clap on 2
+and 4, off-beat hat, 16th hats from bar 9. Builds: backbeat, a snare roll
+that doubles, kick in 8ths, a bar of roll, riser, and the hook's first
+syllable four times in 8ths. Breaks: no kick. When the song's drums swing in
+triplets, the off-beat hat and bass do too. Elements enter and leave on 8-bar lines. The
+song becomes samples: its vocal is cut into phrases, and each keeps its
+place against the song's own beat. Around every phrase the song's drums give
+a local grid (the 16th grid from all onsets, the beat where the kick falls,
+chosen continuously through the song); the phrase's bar maps onto a remix
+bar, so a line that started on the "and" of 4 starts there in the remix,
+and it is time-stretched (pitch kept, WSOLA, onsets locked) from the local
+beat length onto the remix's. Kicks start early by their sample's attack so the heard kick
+is on the beat. Drops play the hook (the loudest, most-repeated phrase run),
+then the song's other hook phrases in order; no phrase plays more than 4
+times in a drop, and the vocal rests rather than repeat more. The other
+sections take the other phrases in the song's order. Each bar's kick and bass note is the root of
+the source passage its phrase plays there (the song's bass note, else its
+chord, else its key), so songs that change key or tempo are followed phrase
+by phrase. The song's own drums and bass are never used; its backing plays
+high-passed in breaks and builds only. Tempo (150-200 BPM) and pitch shift
+(the chosen one, +4 st default, moved by at most 2 st) are fitted together so
+the pitch shift's own speed-up brings the vocal to the grid and the
+remaining stretch stays near 1; the bpm control overrides the tempo.
+
+**Continuous mode** (the mode selector) is the previous engine: the whole
+song sped up on its detected beat grid with new drums on top.
+
+Both: double bells, risers, impacts, echo throws, tape stop, fades, a
+blown-out master, live mixer (level + 3-band EQ per bus, played through the
+render's master), kick picker (CC0 kicks in samples/cc0), drum editor grid
+(kick, bass, snare, hats, bell) with MIDI export/import, WAV render. The
+previous generator is at classic.html.
+
+Score a render against the original song and its true stems (pocket: how
+each vocal onset sits against our kick versus the song's kick; stretch,
+harmony, hook, repeats, leakage, kick/bass overlap, loudness, form):
+`node tools/remix_node.js out.wav --mix song.wav --truth stems/ --layers`
+then `python listen.py out.wav --song song.wav --stems stems/`.
+`node tools/stretch_check.js` checks the time stretcher itself.
 
 Engine: remix-engine.js (runs in remix-worker.js; also in Node via
 tools/remix_node.js).
