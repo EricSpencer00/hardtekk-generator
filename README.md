@@ -103,7 +103,8 @@ syllable four times in 8ths. Breaks: no kick. When the song's drums swing in
 triplets, the off-beat hat and bass do too. Elements enter and leave on 8-bar lines. The
 song becomes samples: its vocal is cut into phrases, and each keeps its
 place against the song's own beat. Around every phrase the song's drums give
-a local grid (the 16th grid from all onsets, the beat where the kick falls,
+a local grid (where they are too sparse to fit one, the nearest window's beat
+carried at the song's tempo) (the 16th grid from all onsets, the beat where the kick falls,
 chosen continuously through the song); the phrase's bar maps onto a remix
 bar, so a line that started on the "and" of 4 starts there in the remix,
 and it is time-stretched (pitch kept, WSOLA, onsets locked) from the local
@@ -119,6 +120,13 @@ high-passed in breaks and builds only. Tempo (150-200 BPM) and pitch shift
 (the chosen one, +4 st default, moved by at most 2 st) are fitted together so
 the pitch shift's own speed-up brings the vocal to the grid and the
 remaining stretch stays near 1; the bpm control overrides the tempo.
+
+**Make one.** The button beside the drop zone needs no song: each press
+composes an original track from a new seed (key, tempo 168-182 BPM, a 4-bar
+chord loop, a 4-bar call-and-answer hook on a supersaw or pluck lead, a pad,
+and formant-synth vocal chops), every note on a 16th step, through chop
+mode's form, groove, kick, fx and master. Headless:
+`node tools/remix_node.js out.wav --scratch [seed]`.
 
 **Continuous mode** (the mode selector) is the previous engine: the whole
 song sped up on its detected beat grid with new drums on top.
