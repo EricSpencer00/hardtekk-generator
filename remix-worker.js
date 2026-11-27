@@ -4,6 +4,7 @@
  * retune or a final render does not redo separation and analysis.
  *
  * in:  {type:"build", mix | stems, samples, opts}   (opts.separator "fast": skip the model)  {type:"rebuild", opts}
+ *      {type:"scratch", samples, seed, opts}   (no song: an original track)
  *      {type:"kick", opts}  {type:"master", mix}
  * out: {type:"log"|"progress"|"built"|"kick"|"wav"|"error", ...}
  */
@@ -56,7 +57,7 @@ function summary(b) {
 async function build(opts) {
   S.opts = opts;
   const t0 = Date.now();
-  S.b = await R.build(S.stems, S.samples, S.an, opts, progress("building"), S.cache);
+  S.b = S.seed ? await R.scratch(S.samples, { ...opts, seed: S.seed }, progress("building")) : await R.build(S.stems, S.samples, S.an, opts, progress("building"), S.cache);
   R.LOG.fn(`built in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
   sendBuilt();
 }
@@ -68,8 +69,11 @@ function sendBuilt() {
 onmessage = async e => {
   const m = e.data;
   try {
-    if (m.type === "build") {
-      S.samples = m.samples; S.cache = {};      // new song: drop the speed/arrangement cache
+    if (m.type === "scratch") {
+      S.samples = m.samples; S.cache = {}; S.stems = S.an = null; S.seed = m.seed;
+      await build(m.opts);
+    } else if (m.type === "build") {
+      S.samples = m.samples; S.cache = {}; S.seed = null;      // new song: drop the speed/arrangement cache
       S.stems = m.stems || null;
       if (!S.stems && m.opts.separator !== "fast") {
         const t0 = Date.now();

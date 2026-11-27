@@ -36,6 +36,8 @@ body::before { content: ""; position: fixed; inset: 0; z-index: -1; background: 
 .label { font-size: 11px; color: var(--fl-dim); }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .ctl { display: grid; gap: 4px; min-width: 0; }
+#source { display: flex; gap: 10px; align-items: stretch; }
+#source #drop { flex: 1; min-width: 0; }
 #drop { border: 1px dashed #5a4f49; border-radius: 3px; padding: 22px 12px; text-align: center; cursor: pointer; background: #141211; }
 #drop.over { border-color: var(--led); background: #221310; }
 #drop strong { display: block; font-size: 15px; color: #f1e9e4; }
@@ -91,7 +93,7 @@ input[type=checkbox] { appearance: auto; -webkit-appearance: checkbox; opacity: 
 
         <section class="rack">
           <div class="rack-body">
-            <div id="drop"><strong id="droptitle">drop a song</strong></div>
+            <div id="source"><div id="drop"><strong id="droptitle">drop a song</strong></div><button id="make">make one</button></div>
             <input type="file" id="file" accept="audio/*" multiple hidden>
             <div id="files"></div>
             <div class="bar" id="bar" hidden><i id="prog"></i></div>
