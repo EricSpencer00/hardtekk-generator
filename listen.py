@@ -519,6 +519,47 @@ def card(render, song, stems):
         out["phrases_displaced"] = f"{sum(1 for x in disp if x)} of {len(disp)} placements by >=1 16th ({', '.join(f'{x:+d}' for x in disp if x)})"
         dd = [abs(np.mean([e for _, e in sorted(v)[-3:]]) - np.mean([e for _, e in sorted(v)[:3]])) * BEAT * 1000 for v in per_pl.values() if len(v) >= 6]
         if dd: out["within_phrase_drift_ms"] = f"median {np.median(dd):.1f}, p90 {np.percentile(dd, 90):.1f} (first 3 vs last 3 onsets, {len(dd)} placements)"
+        # per placement in the drops: its offset (circular mean), drift (first 3 vs last 3 onsets) and spread, in ms;
+        # a miss is any of them over 20 ms. Backbeat: is the onset on a kick beat (1/3) in the song and in the remix?
+        sb = []                                                         # the song's beats, kick minus snare-band per beat
+        kl = sosfiltfilt(butter(4, 120, "lp", fs=SR, output="sos"), dr); sn = sosfiltfilt(butter(4, [1000, 6000], "bp", fs=SR, output="sos"), dr)
+        rms = lambda x, t, P: np.sqrt(np.mean(x[max(0, int((t - 0.1 * P) * SR)):max(1, int((t + 0.3 * P) * SR))] ** 2) + 1e-12)
+        for i, w in enumerate(win):
+            Pw = w[1]; b = at(beats_w[i], Pw, w[0])
+            for k in (-2, -1, 0, 1): t = b + k * Pw; sb.append((t, int(round(t / P0)), 20 * np.log10(rms(kl, t, Pw)) - 20 * np.log10(rms(sn, t, Pw))))
+        sbt, sbi, sbd = (np.array([x[j] for x in sb]) for j in range(3)) if sb else (np.zeros(0),) * 3
+        def parity_at(u):                                             # (song beat index of u, which parity is beat 1/3, evidence in SE)
+            if not len(sbt): return None
+            near_ = np.abs(sbt - u) <= 16 * P0; ii, dd_ = sbi[near_], sbd[near_]
+            if len(ii) < 8: return None
+            x = np.where(ii % 2 == 0, 1, -1) * (dd_ - dd_.mean()); se = x.std() / np.sqrt(len(x)) + 1e-9
+            return int(sbi[np.argmin(np.abs(sbt - u))]), 0 if x.mean() > 0 else 1, abs(x.mean()) / se
+        rows = []
+        for j, v in per_pl.items():
+            p = P[j]; v = sorted(v); e = np.array([x for _, x in v])
+            mu = float(np.angle(np.mean(np.exp(2j * np.pi * e))) / (2 * np.pi)); r = (e - mu + 0.5) % 1 - 0.5
+            drift = abs(np.mean(r[-3:]) - np.mean(r[:3])) if len(r) >= 6 else 0.0
+            spread = float(np.percentile(np.abs(r), 90))
+            u0 = v[0][0]; t0 = OB0 + p["bar"] * BAR + (u0 - p["bar0"]) * p["alpha"] / rate; par = parity_at(u0); bbeat = None
+            if par and m == 1 and par[2] > 3:
+                song_odd = (par[0] - par[1]) % 2; rem_odd = int(round((t0 - OB0 - ko) / BEAT - e[0])) % 2
+                bbeat = song_odd == rem_odd
+            ms = lambda x: abs(x) * BEAT * 1000
+            cls = []
+            a = abs(mu)
+            if a > 0.40: cls.append("half-beat")
+            elif 0.18 < a <= 0.40: cls.append("16th")
+            elif ms(mu) > 20: cls.append("grid phase")
+            if ms(drift) > 20: cls.append("tempo drift")
+            if ms(spread) > 20 and ms(drift) <= 20: cls.append("scatter")
+            if bbeat is False: cls.append("backbeat offset")
+            rows.append({"j": j, "i": p["i"], "bar": p["bar"], "kind": p["kind"], "n": len(e), "off_ms": round(ms(mu) * np.sign(mu), 1), "drift_ms": round(ms(drift), 1),
+                         "spread_ms": round(ms(spread), 1), "backbeat": bbeat, "bb_se": round(float(par[2]), 1) if par else None, "miss": bool(cls), "why": cls})
+        dr_ = [x for x in rows if x["kind"] == "drop"]; mi = [x for x in dr_ if x["miss"]]
+        from collections import Counter
+        why = Counter(w for x in mi for w in x["why"])
+        out["drop_pocket"] = f"{len(mi)} of {len(dr_)} drop placements off by > 20 ms" + (f" ({', '.join(f'{k} {n}' for k, n in why.most_common())})" if mi else "")
+        out["placements"] = rows
     if chop:
         se = []
         for p in P:  # the true onset nearest the phrase's onset, against where the engine meant it (bar line + pickup)
@@ -637,7 +678,9 @@ def main():
         if a.json: print(json.dumps(c)); return
         print(f"\nCARD {a.wav}  (reference: {os.path.basename(a.song)})")
         for k, v in c.items():
-            print(f"  {k:32s} {v}")
+            if k != "placements": print(f"  {k:32s} {v}")
+        for x in c.get("placements", []):
+            if x["miss"] and x["kind"] == "drop": print(f"    miss: phrase {x['i']} at bar {x['bar']}: offset {x['off_ms']:+.0f} ms, drift {x['drift_ms']:.0f}, spread {x['spread_ms']:.0f} ({', '.join(x['why'])})")
         return
     if a.song:
         print(f"\nSTRUCTURE {a.wav}  (reference: {os.path.basename(a.song)})")
