@@ -674,13 +674,18 @@ async function analyzePhrases(stems, an, progress = () => {}) {
   });
   for (let i = W_.length - 1, j = W_.length ? vit[i].v.indexOf(Math.max(...vit[i].v)) : 0; i >= 0; j = vit[i].from[j], i--) W_[i].beat = cand(W_[i], j);
   // the grid around a phrase: its own fit for period and 16th phase, the beat at the 16th nearest the song's beat there
+  // no clear grid around the phrase (its drums drop out or are too sparse): the nearest window's beat, carried at
+  // the song's tempo (its tracked beats where the tempo moves)
   const fitGrid = (a, b) => {
-    const g = fit16(a, b); if (!g.ok || !W_.length) return { ok: false, P: g.P };
-    const mid = (a + b) / 2, w = W_.reduce((x, y) => Math.abs(y.c - mid) < Math.abs(x.c - mid) ? y : x);
-    return { ok: true, P: g.P, ph: at(g.ph16, g.P / 4, at(w.beat, w.P, mid)), R: g.R };
+    if (!W_.length) return { ok: false, P: localP(a, b) };
+    const g = fit16(a, b), mid = (a + b) / 2, w = W_.reduce((x, y) => Math.abs(y.c - mid) < Math.abs(x.c - mid) ? y : x);
+    if (g.ok) return { ok: true, P: g.P, ph: at(g.ph16, g.P / 4, at(w.beat, w.P, mid)), R: g.R };
+    if (!src.moving) return { ok: true, carried: true, P: P0, ph: w.beat, R: 0 };
+    const kw = Math.round(beatPos(w.beat)), km = Math.round(beatPos(mid));
+    return { ok: true, carried: true, P: localP(a, b), ph: beatAt(km) + (w.beat - beatAt(kw)), R: 0 };
   };
   const beatAt = k => { const B = src.beats; return !src.moving ? src.ph + k * P0 : k <= 0 ? B[0] + k * P0 : k >= B.length - 1 ? B[B.length - 1] + (k - B.length + 1) * P0 : B[k]; };
-  let snapped = 0;
+  let snapped = 0, carried = 0;
   const all = ph.map((p, i) => {
     let smax = 0; von.t.forEach((t, k) => { if (t >= p.t0 - 0.06 && t < p.t1) smax = Math.max(smax, von.s[k]); });
     const k0 = von.t.findIndex((t, k) => t >= p.t0 - 0.06 && t < p.t0 + Math.min(0.3, 0.6 * P0) && von.s[k] >= 0.3 * smax);
@@ -692,7 +697,8 @@ async function analyzePhrases(stems, an, progress = () => {}) {
       const k = beatPos(on); let kb = src.down + 4 * Math.floor((k - src.down) / 4); if (k - kb >= 3) kb += 4;
       bar0 = g.ph + Math.round((beatAt(kb) - g.ph) / P) * P; q = (on - bar0) / P;
     } else snapped++;
-    const gridR = g.R ?? 0, gridOk = g.ok;
+    if (g.carried) carried++;
+    const gridR = g.R ?? 0, gridOk = g.ok && !g.carried;
     let nv = 0, na = 0; for (let k = 0; k < vt.t.length; k++) if (vt.t[k] >= p.t0 && vt.t[k] < p.t1) { na++; nv += vt.voiced[k]; }
     const kb = Math.max(1, Math.ceil((p.t1 - bar0) / P - 0.1));
     return { i, t0: p.t0, t1: p.t1, s0: Math.min(p.t0, on) - 0.03, on, q, P, bar0, kb, gridR, gridOk, vf: na ? nv / na : 0, loud: rmsDb(full, Math.round(on * SR), Math.round(p.t1 * SR)) };
@@ -751,7 +757,7 @@ async function analyzePhrases(stems, an, progress = () => {}) {
     const rep = hookRuns.filter(r => r !== top && dur(r) >= 0.5 * dur(top) && r.some(p => ti.some(i => S[i][list.indexOf(p)] >= thr))).sort((a, b) => rs_(b) - rs_(a));
     hookRuns = [top, ...rep, ...hookRuns.filter(r => r !== top && !rep.includes(r)).sort((a, b) => rs_(b) - rs_(a))];
   }
-  log(`  phrases: ${all.length} found, ${list.length} usable (voiced share >= ${(0.5 * vfMed).toFixed(2)});${snapped ? ` ${snapped} with no clear beat around them start on their bar line;` : ""} hook by ${how} (evidence ${conf.toFixed(1)} SD): ${hookRuns.map(r => r.map(p => p.on.toFixed(1)).join("+")).join(", ")} s`);
+  log(`  phrases: ${all.length} found, ${list.length} usable (voiced share >= ${(0.5 * vfMed).toFixed(2)});${carried ? ` ${carried} with no clear beat around them take the nearest one;` : ""}${snapped ? ` ${snapped} with no beat at all start on their bar line;` : ""} hook by ${how} (evidence ${conf.toFixed(1)} SD): ${hookRuns.map(r => r.map(p => p.on.toFixed(1)).join("+")).join(", ")} s`);
   progress(1);
   // feel: the drums' onsets against the beat, straight 16ths or 8th-note triplets (harmonic 4 vs 3 of their phase)
   const dph = src.on.t.map(beatPos), Rh = h => Math.hypot(avg(dph.map(x => Math.cos(2 * Math.PI * h * x))), avg(dph.map(x => Math.sin(2 * Math.PI * h * x))));
